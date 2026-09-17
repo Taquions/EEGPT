@@ -199,8 +199,18 @@ for fold in range(10):
     set_valid = set(subjects[fold*N:(fold+1)*N])
     set_train = set_all - set_valid
 
-    train_dataset = torchvision.datasets.DatasetFolder(root="../datasets/downstream/sleep_edf/TrainFold", loader=lambda x: torch.load(x),  extensions=[f'.s{i}' for i in set_train])
-    valid_dataset = torchvision.datasets.DatasetFolder(root="../datasets/downstream/sleep_edf/TrainFold", loader=lambda x: torch.load(x), extensions=[f'.s{i}' for i in set_valid])
+    # Fix: extensions=[f'.s{i}' ...] never matches, because the files produced by
+    # prepare_sleep.py are named s{i}_X_Y.pt -- the real extension is always '.pt'.
+    # Replaced with is_valid_file, which filters on the basename prefix instead.
+    import os as _os
+    train_dataset = torchvision.datasets.DatasetFolder(
+        root="../datasets/downstream/sleep_edf/TrainFold",
+        loader=lambda x: torch.load(x),
+        is_valid_file=lambda f, _st=set_train: any(_os.path.basename(f).startswith(f's{i}_') for i in _st))
+    valid_dataset = torchvision.datasets.DatasetFolder(
+        root="../datasets/downstream/sleep_edf/TrainFold",
+        loader=lambda x: torch.load(x),
+        is_valid_file=lambda f, _sv=set_valid: any(_os.path.basename(f).startswith(f's{i}_') for i in _sv))
 
     # -- begin Training ------------------------------
 
