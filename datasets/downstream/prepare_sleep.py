@@ -55,7 +55,7 @@ test_dataset_fold = dataset_fold + "TestFold/"
 
 # subjects = np.unique(windows_dataset.description['subject'])
 np.random.seed(7)
-for sub in range(39,83): # This dataset contains subjects 0 to 82 with missing subjects [39, 68, 69, 78, 79].
+for sub in range(0,83): # This dataset contains subjects 0 to 82 with missing subjects [39, 68, 69, 78, 79].
     if sub in [39, 68, 69, 78, 79]: continue
     r = np.random.rand()
     if r<0.6: 
