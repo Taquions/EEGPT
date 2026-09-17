@@ -1,0 +1,36 @@
+# Environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Pretrained weights and training checkpoints (hundreds of MB each)
+checkpoint/
+*.ckpt
+*.pth
+*.pt
+*.safetensors
+
+# Raw and preprocessed datasets (tens of GB)
+datasets/downstream/sleep_edf/
+datasets/downstream/sadt_raw/
+datasets/downstream/sadt/
+datasets/pretrain/data/
+downstream/Data/
+*.set
+*.fdt
+*.edf
+*.tar
+*.tar.gz
+*.zip
+
+# Training outputs
+logs/
+lightning_logs/
+wandb/
+*.log
+events.out.tfevents.*
+
+# OS / editor
+.DS_Store
+*.bak
