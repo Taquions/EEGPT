@@ -32,6 +32,11 @@ REPO_URL="${REPO_URL:-https://github.com/Taquions/EEGPT.git}"
 GPU="${GPU:-l4}"
 SPOT="${SPOT:-1}"
 EXTRA="${EXTRA:-}"
+# A hard ceiling on how long an instance may live, whatever happens to the job.
+# An idle VM that nobody notices is the most expensive failure available here:
+# one silently-never-started campaign cost seven hours of A100 before anyone
+# checked. The campaign itself is well under an hour.
+MAX_RUN="${MAX_RUN:-4h}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -129,7 +134,7 @@ do_run() {
   # Expanded with the ${a[@]+...} guard below: under `set -u`, bash 3.2 (which is
   # what macOS ships) treats an empty array expansion as an unbound variable.
   local spot_args=()
-  [ "$SPOT" = "1" ] && spot_args=(--provisioning-model=SPOT --instance-termination-action=DELETE)
+  [ "$SPOT" = "1" ] && spot_args=(--provisioning-model=SPOT)
 
   local zone=""
   local existing; existing="$(zone_of_vm)"
@@ -172,6 +177,7 @@ do_run() {
         --project="$PROJECT" --zone="$Z" --machine-type="$MACHINE" \
         ${spot_args[@]+"${spot_args[@]}"} --maintenance-policy=TERMINATE \
         --image-family="$IMAGE_FAMILY" --image-project="$IMAGE_PROJECT" \
+        --max-run-duration="$MAX_RUN" --instance-termination-action=DELETE \
         --boot-disk-size=200 --boot-disk-type=pd-balanced \
         --metadata=install-nvidia-driver=True \
         --scopes=https://www.googleapis.com/auth/cloud-platform \
