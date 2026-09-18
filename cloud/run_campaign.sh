@@ -179,7 +179,10 @@ do_monitor() {
   local strategy="${1:?strategy required}"
   local zone; zone="$(zone_of_vm)"
   while true; do
-    local n; n=$(gcloud storage ls "gs://$BUCKET/results/${strategy}_fold*.json" 2>/dev/null | wc -l | tr -d ' ')
+    # `gcloud storage ls` exits non-zero when nothing matches, which under
+    # `set -e` with pipefail kills the assignment -- and nothing matches on the
+    # first pass, every time.
+    local n; n=$( { gcloud storage ls "gs://$BUCKET/results/${strategy}_fold*.json" 2>/dev/null || true; } | wc -l | tr -d ' ')
     local state="gone"
     [ -n "$zone" ] && state=$(gcloud compute instances describe "$VM_NAME" \
       --project="$PROJECT" --zone="$zone" --format="value(status)" 2>/dev/null || echo gone)
