@@ -127,8 +127,24 @@ do_run() {
   local zone=""
   local existing; existing="$(zone_of_vm)"
   if [ -n "$existing" ]; then
-    log "reusing the VM already up in $existing"
-    zone="$existing"
+    local state
+    state=$(gcloud compute instances describe "$VM_NAME" --project="$PROJECT" \
+      --zone="$existing" --format="value(status)" 2>/dev/null || echo gone)
+    case "$state" in
+      RUNNING)
+        log "reusing the VM already up in $existing"
+        zone="$existing" ;;
+      gone)
+        rm -f "$ZONE_FILE" ;;
+      *)
+        # A TERMINATED instance still holds the name, so creating fails and
+        # reusing hangs in the SSH wait. It is this script's own VM and it is
+        # dead, so replace it.
+        log "an earlier VM is $state in $existing -- deleting it before relaunching"
+        gcloud compute instances delete "$VM_NAME" --project="$PROJECT" \
+          --zone="$existing" --quiet --delete-disks=all || true
+        rm -f "$ZONE_FILE" ;;
+    esac
   fi
   for Z in $ZONES; do
     [ -n "$zone" ] && break
