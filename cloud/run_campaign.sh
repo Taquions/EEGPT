@@ -139,8 +139,20 @@ do_run() {
       --zone="$existing" --format="value(status)" 2>/dev/null || echo gone)
     case "$state" in
       RUNNING)
-        log "reusing the VM already up in $existing"
-        zone="$existing" ;;
+        # A VM that has just finished a campaign reports RUNNING while its
+        # `shutdown -h +5` is still pending, so reusing it blindly means racing
+        # a machine that is on its way down. Cancel the shutdown first, and if
+        # that does not work, treat it as unusable.
+        if gcloud compute ssh "$VM_NAME" --project="$PROJECT" --zone="$existing" \
+             --tunnel-through-iap --quiet --command="sudo shutdown -c" &>/dev/null; then
+          log "reusing the VM already up in $existing (pending shutdown cancelled)"
+          zone="$existing"
+        else
+          log "the VM in $existing is up but not answering -- replacing it"
+          gcloud compute instances delete "$VM_NAME" --project="$PROJECT" \
+            --zone="$existing" --quiet --delete-disks=all || true
+          rm -f "$ZONE_FILE"
+        fi ;;
       gone)
         rm -f "$ZONE_FILE" ;;
       *)
