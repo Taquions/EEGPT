@@ -113,6 +113,13 @@ do_run() {
   fi
   log "strategy=$strategy folds=[$spec] commit=${commit:0:8} gpu=$GPU spot=$SPOT"
 
+  # Clear this strategy's sentinels: a stale one from a previous attempt makes
+  # the monitor report a verdict seconds after launch, for a run that has not
+  # started. Per-fold results are deliberately left in place -- they are what
+  # lets a resumed campaign skip the folds it already has.
+  gcloud storage rm "gs://$BUCKET/sentinels/${strategy}_DONE_OK.txt" \
+    "gs://$BUCKET/sentinels/${strategy}_DONE_FAIL.txt" 2>/dev/null || true
+
   local remote="$SCRIPT_DIR/.campaign_remote.rendered.sh"
   sed -e "s|@BUCKET@|$BUCKET|g" -e "s|@REPO@|$REPO_URL|g" \
       -e "s|@COMMIT@|$commit|g" -e "s|@STRATEGY@|$strategy|g" \
