@@ -116,6 +116,8 @@ do_run() {
       -e "s|@FOLDS@|$folds|g" -e "s|@EXTRA_ARGS@|$EXTRA|g" \
       "$SCRIPT_DIR/_campaign_remote.sh" > "$remote"
 
+  # Expanded with the ${a[@]+...} guard below: under `set -u`, bash 3.2 (which is
+  # what macOS ships) treats an empty array expansion as an unbound variable.
   local spot_args=()
   [ "$SPOT" = "1" ] && spot_args=(--provisioning-model=SPOT --instance-termination-action=DELETE)
 
@@ -124,7 +126,7 @@ do_run() {
     log "trying zone $Z"
     if gcloud compute instances create "$VM_NAME" \
         --project="$PROJECT" --zone="$Z" --machine-type="$MACHINE" \
-        "${spot_args[@]}" --maintenance-policy=TERMINATE \
+        ${spot_args[@]+"${spot_args[@]}"} --maintenance-policy=TERMINATE \
         --image-family="$IMAGE_FAMILY" --image-project="$IMAGE_PROJECT" \
         --boot-disk-size=200 --boot-disk-type=pd-balanced \
         --metadata=install-nvidia-driver=True \
