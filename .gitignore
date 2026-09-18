@@ -34,3 +34,8 @@ events.out.tfevents.*
 # OS / editor
 .DS_Store
 *.bak
+
+# Runtime state written by cloud/run_campaign.sh
+cloud/.campaign_zone
+cloud/.campaign_remote.rendered.sh
+cloud/sadt.tar
