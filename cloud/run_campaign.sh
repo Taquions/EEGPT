@@ -122,7 +122,13 @@ do_run() {
   [ "$SPOT" = "1" ] && spot_args=(--provisioning-model=SPOT --instance-termination-action=DELETE)
 
   local zone=""
+  local existing; existing="$(zone_of_vm)"
+  if [ -n "$existing" ]; then
+    log "reusing the VM already up in $existing"
+    zone="$existing"
+  fi
   for Z in $ZONES; do
+    [ -n "$zone" ] && break
     log "trying zone $Z"
     if gcloud compute instances create "$VM_NAME" \
         --project="$PROJECT" --zone="$Z" --machine-type="$MACHINE" \
@@ -148,8 +154,14 @@ do_run() {
     [ "$i" = 40 ] && { echo "ssh never came up" >&2; exit 1; }
   done
 
-  gcloud compute scp "$remote" "$VM_NAME:/opt/campaign.sh" \
+  # scp runs as the login user, which cannot write /opt, so stage it in the home
+  # directory and move it with sudo. /opt rather than /tmp because /tmp does not
+  # survive a reboot, and a preempted spot VM may come back.
+  gcloud compute scp "$remote" "$VM_NAME:~/campaign.sh" \
     --project="$PROJECT" --zone="$zone" --tunnel-through-iap --quiet
+  gcloud compute ssh "$VM_NAME" --project="$PROJECT" --zone="$zone" \
+    --tunnel-through-iap --quiet \
+    --command="sudo install -m 0755 ~/campaign.sh /opt/campaign.sh"
   rm -f "$remote"
 
   # setsid+nohup rather than a GCE startup-script: the metadata script runner
