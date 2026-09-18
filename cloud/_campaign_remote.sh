@@ -25,6 +25,19 @@ exec > >(tee -a "$LOG") 2>&1
 
 echo "=== campaign start $(date -Iseconds) ==="
 echo "strategy=$STRATEGY folds=$FOLDS commit=$COMMIT"
+
+# Any `exit 1` below is a setup failure: report it and stop paying, instead of
+# leaving the watcher polling a machine that will never produce a fold.
+on_exit() {
+  local rc=$?
+  if [ "$rc" != "0" ]; then
+    gcloud storage cp "$LOG" "gs://$BUCKET/logs/campaign_$STRATEGY.log" || true
+    echo "setup failed rc=$rc $(date -Iseconds)" | \
+      gcloud storage cp - "gs://$BUCKET/sentinels/${STRATEGY}_DONE_FAIL.txt" || true
+    shutdown -h +2 "setup failed" || true
+  fi
+}
+trap on_exit EXIT
 shutdown -c 2>/dev/null || true
 
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || { echo "GPU FAIL"; exit 1; }
@@ -32,12 +45,17 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || { echo "GPU FA
 # --- one-time setup -------------------------------------------------------
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq python3-venv python3-pip git
+# A freshly booted VM is running unattended-upgrades, which holds the dpkg lock.
+# Without a timeout apt fails instantly, and since this script does not use
+# `set -e` it used to march past that all the way to `python: command not found`.
+apt-get -o DPkg::Lock::Timeout=600 update -qq
+apt-get -o DPkg::Lock::Timeout=600 install -y -qq python3-venv python3-pip git \
+  || { echo "SETUP FAIL: apt install"; exit 1; }
 
 rm -rf /opt/venv
-python3 -m venv /opt/venv
+python3 -m venv /opt/venv || { echo "SETUP FAIL: venv"; exit 1; }
 source /opt/venv/bin/activate
+command -v python >/dev/null || { echo "SETUP FAIL: python not on PATH"; exit 1; }
 pip install --quiet --upgrade pip
 
 # Driver 580 is backward compatible with CUDA 11.8, and the cu118 wheels run on
@@ -50,7 +68,8 @@ pip install --quiet \
   transformers==4.35.2 numpy==1.26.4 pandas==1.5.3 scipy==1.10.1 \
   "scikit-learn==1.4.1.post1" mne==1.4.2 braindecode==0.8.1 pyhealth==1.1.4 \
   peft==0.7.0 tqdm==4.65.0 matplotlib==3.7.1 tensorboard==2.16.2 h5py==3.8.0 PyYAML==6.0
-python -c "import torch; print('cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+python -c "import torch; assert torch.cuda.is_available(); print('cuda', torch.cuda.get_device_name(0))" \
+  || { echo "SETUP FAIL: torch cannot see the GPU"; exit 1; }
 
 rm -rf /opt/EEGPT
 git clone --quiet "$REPO" /opt/EEGPT
