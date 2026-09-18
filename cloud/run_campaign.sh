@@ -87,7 +87,10 @@ do_upload() {
   fi
 
   log "packing $(ls "$data"/*.pt | wc -l | tr -d ' ') session files"
-  tar -cf "$SCRIPT_DIR/sadt.tar" -C "$REPO_ROOT/datasets/downstream" sadt
+  # COPYFILE_DISABLE stops macOS tar from attaching extended-attribute headers
+  # that GNU tar on the VM then warns about for every single member.
+  COPYFILE_DISABLE=1 tar -cf "$SCRIPT_DIR/sadt.tar" \
+    -C "$REPO_ROOT/datasets/downstream" sadt
   log "uploading data ($(du -h "$SCRIPT_DIR/sadt.tar" | cut -f1))"
   gcloud storage cp "$SCRIPT_DIR/sadt.tar" "gs://$BUCKET/datasets/"
   rm -f "$SCRIPT_DIR/sadt.tar"

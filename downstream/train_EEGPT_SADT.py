@@ -71,12 +71,24 @@ def seed_everything(seed=7):
 # --- data --------------------------------------------------------------------
 
 def load_subjects(data_dir):
-    """Read every session .pt and group the windows by subject."""
+    """Read every session .pt and group the windows by subject.
+
+    Names the file in the error rather than letting the unpickling error surface
+    on its own: a bad file inside a thousand-file archive is otherwise invisible,
+    and `invalid load key` says nothing about which one. Leading-dot files are
+    skipped because a shell glob hides them while os.listdir does not, so a
+    stray one would be counted as fine by the setup log and then fail here.
+    """
     per_subject = {}
     for name in sorted(os.listdir(data_dir)):
-        if not name.endswith(".pt"):
+        if not name.endswith(".pt") or name.startswith("."):
             continue
-        blob = torch.load(os.path.join(data_dir, name), map_location="cpu")
+        path = os.path.join(data_dir, name)
+        try:
+            blob = torch.load(path, map_location="cpu")
+        except Exception as exc:
+            raise RuntimeError(
+                f"could not read {path} ({os.path.getsize(path)} bytes): {exc}") from exc
         sub = int(blob["subject"])
         X, y = blob["X"], blob["y"]
         if sub in per_subject:

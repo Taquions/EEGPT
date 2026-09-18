@@ -64,7 +64,12 @@ mkdir -p checkpoint downstream/Data/BCIC_2a_0_38HZ datasets/downstream
 gcloud storage cp "gs://$BUCKET/checkpoints/eegpt_mcae_58chs_4s_large4E.ckpt" checkpoint/
 gcloud storage cp "gs://$BUCKET/datasets/sadt.tar" /tmp/
 tar -xf /tmp/sadt.tar -C datasets/downstream
-echo "$(ls datasets/downstream/sadt/*.pt | wc -l) session files ready"
+# Count with find rather than a glob, and report the total size: a shell glob
+# hides leading-dot files, and a name count alone would not notice a truncated
+# extraction.
+echo "$(find datasets/downstream/sadt -name '*.pt' | wc -l) session files, \
+$(du -sh datasets/downstream/sadt | cut -f1) on disk"
+echo "smallest: $(find datasets/downstream/sadt -name '*.pt' -printf '%s %p\n' | sort -n | head -1)"
 echo "=== setup done $(date -Iseconds) ==="
 
 # --- fold loop ------------------------------------------------------------
