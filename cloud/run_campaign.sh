@@ -202,13 +202,27 @@ do_run() {
     --command="sudo install -m 0755 ~/campaign.sh /opt/campaign.sh"
   rm -f "$remote"
 
-  # setsid+nohup rather than a GCE startup-script: the metadata script runner
-  # has an internal timeout and kills long jobs through the cgroup with no
-  # Python traceback. /opt rather than /tmp, which does not survive a reboot.
-  log "launching detached"
+  # systemd-run, not a GCE startup-script and not setsid+nohup. The startup-script
+  # runner has an internal timeout and kills long jobs through the cgroup with no
+  # Python traceback. setsid+nohup backgrounded inside `ssh --command` loses the
+  # race against the session closing: the unit was staged, the command returned
+  # "launching detached", and nothing ever ran -- the VM sat idle for seven hours.
+  # A transient unit is owned by systemd from the moment it is created, and
+  # `systemctl is-active` says so straight away.
+  log "launching as a systemd unit"
   gcloud compute ssh "$VM_NAME" --project="$PROJECT" --zone="$zone" \
     --tunnel-through-iap --quiet \
-    --command="sudo setsid nohup bash /opt/campaign.sh > /dev/null 2>&1 < /dev/null &"
+    --command="sudo systemctl reset-failed tg-campaign 2>/dev/null; \
+               sudo systemd-run --unit=tg-campaign --collect bash /opt/campaign.sh"
+
+  log "confirming it is running"
+  if ! gcloud compute ssh "$VM_NAME" --project="$PROJECT" --zone="$zone" \
+       --tunnel-through-iap --quiet \
+       --command="sleep 5; systemctl is-active tg-campaign" 2>/dev/null | grep -q active; then
+    echo "the unit did not come up -- check: gcloud compute ssh $VM_NAME --zone=$zone" >&2
+    echo "then: sudo journalctl -u tg-campaign -n 50" >&2
+    exit 1
+  fi
 
   log "running. follow with: $0 monitor $strategy"
 }
