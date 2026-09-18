@@ -96,9 +96,19 @@ echo "=== setup done $(date -Iseconds) ==="
 cd /opt/EEGPT/downstream
 mkdir -p results_sadt
 
+# EXTRA_ARGS holds one or more argument sets separated by ';'. A single set is
+# an ordinary campaign; several turn this into an ablation that shares one boot,
+# instead of paying six minutes of apt, pip and downloads per configuration.
 FAILED=0
+IFS=';' read -ra CONFIGS <<< "$EXTRA_ARGS"
+[ ${#CONFIGS[@]} -eq 0 ] && CONFIGS=("")
+
+for CONFIG in "${CONFIGS[@]}"; do
 for FOLD in $FOLDS; do
-  TAG=$(printf "%s_fold%02d" "$STRATEGY" "$FOLD")
+  # The suffix that keeps configurations apart in the bucket is the one the
+  # training script is told to use, so the name always matches the run.
+  SUFFIX=$(echo "$CONFIG" | grep -o -- '--tag-suffix[= ][^ ]*' | sed 's/.*[= ]//')
+  TAG=$(printf "%s%s_fold%02d" "$STRATEGY" "$SUFFIX" "$FOLD")
   if gcloud storage ls "gs://$BUCKET/results/$TAG.json" &>/dev/null; then
     echo "--- $TAG already in the bucket, skipping"
     continue
@@ -107,7 +117,7 @@ for FOLD in $FOLDS; do
   echo "=== $TAG start $(date -Iseconds) ==="
   # shellcheck disable=SC2086
   python train_EEGPT_SADT.py --fold "$FOLD" --strategy "$STRATEGY" \
-      --out results_sadt $EXTRA_ARGS
+      --out results_sadt $CONFIG
   RC=$?
 
   if [ "$RC" = "0" ] && [ -f "results_sadt/$TAG.json" ]; then
@@ -118,6 +128,7 @@ for FOLD in $FOLDS; do
     echo "=== $TAG FAILED rc=$RC $(date -Iseconds) ==="
   fi
   gcloud storage cp "$LOG" "gs://$BUCKET/logs/campaign_$STRATEGY.log" || true
+done
 done
 
 # --- finish ---------------------------------------------------------------
