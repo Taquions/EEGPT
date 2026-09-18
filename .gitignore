@@ -26,6 +26,7 @@ downstream/Data/
 
 # Training outputs
 logs/
+!downstream/results_sadt/
 lightning_logs/
 wandb/
 *.log
