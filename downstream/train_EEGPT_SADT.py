@@ -233,7 +233,7 @@ class LitEEGPTSADT(pl.LightningModule):
                 r=self.args.lora_r,
                 lora_alpha=self.args.lora_alpha,
                 lora_dropout=self.args.lora_dropout,
-                target_modules=["qkv"],
+                target_modules=self.args.lora_targets.split(","),
                 bias="none")
             self.target_encoder = inject_adapter_in_model(config, self.target_encoder)
             for name, p in self.target_encoder.named_parameters():
@@ -379,6 +379,10 @@ def main():
     ap.add_argument("--lora-r", type=int, default=8, help="lora: adapter rank")
     ap.add_argument("--lora-alpha", type=int, default=16, help="lora: scaling factor")
     ap.add_argument("--lora-dropout", type=float, default=0.05)
+    ap.add_argument("--lora-targets", default="qkv",
+                    help="comma-separated attention modules to adapt. 'qkv' is the "
+                         "fused query/key/value projection; adding 'proj' also adapts "
+                         "the output projection of each attention block")
     ap.add_argument("--encoder-channels", default="sadt", choices=["sadt", "full"],
                     help="channels presented to the encoder: the dataset's own 30, or "
                          "EEGPT's full 62-channel layout with the spatial filter "
