@@ -1,0 +1,66 @@
+{
+  "strategy": "layerwise",
+  "fold": 18,
+  "test_subject": 45,
+  "valid_subjects": [
+    4,
+    22,
+    23,
+    44
+  ],
+  "n_train_subjects": 20,
+  "trainable_head": 35092,
+  "trainable_encoder": 3152384,
+  "train_seconds": 193.7,
+  "epochs_run": 17,
+  "peak_gb": 6.02,
+  "window_s": 3.0,
+  "config": {
+    "data": "/opt/EEGPT/downstream/../datasets/downstream/sadt",
+    "checkpoint": "/opt/EEGPT/downstream/../checkpoint/eegpt_mcae_58chs_4s_large4E.ckpt",
+    "out": "results_sadt",
+    "strategy": "layerwise",
+    "fold": 18,
+    "unfreeze_n": 1,
+    "lora_r": 8,
+    "lora_alpha": 16,
+    "lora_dropout": 0.05,
+    "lora_targets": "qkv",
+    "encoder_channels": "full",
+    "balance": "loss",
+    "tune_threshold": true,
+    "valid_subjects": 4,
+    "batch_size": 64,
+    "max_epochs": 25,
+    "lr_head": 0.0002,
+    "lr_encoder": 5e-05,
+    "patience": 8,
+    "num_workers": 4,
+    "precision": "16-mixed",
+    "accelerator": "auto",
+    "seed": 7,
+    "tag_suffix": "_best",
+    "fast_dev_run": false
+  },
+  "accuracy": 0.7642105263157895,
+  "balanced_accuracy": 0.8217800094358698,
+  "roc_auc": 0.9265687133517558,
+  "f1": 0.5447154471544715,
+  "cohen_kappa": 0.41790489528853103,
+  "confusion_matrix": [
+    [
+      296,
+      105
+    ],
+    [
+      7,
+      67
+    ]
+  ],
+  "balanced_accuracy_at_half": 0.8502224169306464,
+  "threshold": 0.14790711433803497,
+  "valid_balanced_accuracy": 0.6814027894262727,
+  "valid_roc_auc": 0.7615941353710434,
+  "n_test": 475,
+  "n_test_drowsy": 74
+}
