@@ -212,11 +212,19 @@ def label_trials(trials):
     return labels, baseline, glob
 
 
-def cut_windows(data, times, labels, window_samples, sfreq):
-    """Cut one window per labelled trial, ending at the deviation onset."""
+def cut_windows(data, times, labels, window_samples, sfreq, keep_intermediate=False):
+    """Cut one window per trial, ending at the deviation onset.
+
+    Trials whose reaction time falls between the alert and drowsy thresholds are
+    kept when asked for, carrying label -1. They are more numerous than the
+    labelled ones -- 10,727 against 11,012 over the dataset -- so discarding them
+    throws away more data than it keeps. A training run can turn them into soft
+    targets from the reaction-time ratio; evaluation must still use only the
+    strict classes, or the metric stops meaning what it means everywhere else.
+    """
     X, y, keep_idx = [], [], []
     for i, (t, lab) in enumerate(zip(times, labels)):
-        if lab == LABEL_DISCARD:
+        if lab == LABEL_DISCARD and not keep_intermediate:
             continue
         end = int(round(t * sfreq))
         start = end - window_samples
@@ -274,7 +282,8 @@ def process_session(path, args):
     local = np.array([rt for _, rt in trials])
 
     window_samples = int(round(args.window_s * SFREQ_OUT))
-    X, y, idx = cut_windows(raw.get_data(), times, labels, window_samples, SFREQ_OUT)
+    X, y, idx = cut_windows(raw.get_data(), times, labels, window_samples, SFREQ_OUT,
+                            args.keep_intermediate)
     if X is None:
         return {**base, "status": "no windows survived"}
 
@@ -288,6 +297,10 @@ def process_session(path, args):
         "y": torch.from_numpy(y),
         "rt": torch.from_numpy(local[idx].astype(np.float32)),
         "rt_global": torch.from_numpy(glob[idx].astype(np.float32)),
+        # Reaction time as a multiple of the session's alert baseline. This is
+        # what the binary rule thresholds at 1.5 and 2.5, kept as a continuous
+        # value so a training run can use the intermediate trials.
+        "ratio": torch.from_numpy((local[idx] / baseline).astype(np.float32)),
         "alert_baseline": baseline,
         "subject": subject,
         "session": stem,
@@ -301,6 +314,7 @@ def process_session(path, args):
         "alert_baseline_s": round(baseline, 4),
         "windows_alert": int((y == LABEL_ALERT).sum()),
         "windows_drowsy": int((y == LABEL_DROWSY).sum()),
+        "windows_intermediate": int((y == LABEL_DISCARD).sum()),
         "trials_discarded": int((labels == LABEL_DISCARD).sum()),
         "n_channels": len(channels),
     }
@@ -332,6 +346,9 @@ def main():
                          "own tutorial (seconds)")
     ap.add_argument("--max-rt", type=float, default=10.0,
                     help="reaction times above this are treated as no response (seconds)")
+    ap.add_argument("--keep-intermediate", action="store_true",
+                    help="also write the trials whose reaction time falls between the "
+                         "alert and drowsy thresholds, labelled -1")
     ap.add_argument("--min-trials", type=int, default=20,
                     help="skip sessions with fewer clean trials than this")
     ap.add_argument("--no-euclidean-alignment", dest="euclidean_alignment",

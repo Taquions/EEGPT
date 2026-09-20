@@ -74,6 +74,17 @@ DEPTH = 8
 MIN_WINDOWS_PER_CLASS = 1
 
 
+def sinusoidal_embedding(length, dim):
+    """Absolute sin/cos positional encoding, as used by the upstream head."""
+    pos = torch.arange(length, dtype=torch.float32).unsqueeze(1)
+    omega = torch.exp(torch.arange(0, dim, 2, dtype=torch.float32)
+                      * -(np.log(10000.0) / dim))
+    out = torch.zeros(length, dim)
+    out[:, 0::2] = torch.sin(pos * omega)
+    out[:, 1::2] = torch.cos(pos * omega)
+    return out
+
+
 def seed_everything(seed=7):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -192,9 +203,31 @@ class LitEEGPTSADT(pl.LightningModule):
         self.chans_id = self.target_encoder.prepare_chan_ids(self.channel_names)
 
         self.chan_conv = Conv1dWithConstraint(N_INPUT_CHANNELS, self.chans_num, 1, max_norm=1)
-        self.linear_probe1 = LinearWithConstraint(EMBED_NUM * EMBED_DIM, 16, max_norm=1)
-        self.linear_probe2 = LinearWithConstraint(n_patches * 16, 2, max_norm=0.25)
         self.drop = nn.Dropout(p=0.5)
+
+        if args.head == "flat":
+            # Flatten every patch into one vector and classify. Treats all
+            # instants as equally informative.
+            self.linear_probe1 = LinearWithConstraint(EMBED_NUM * EMBED_DIM, 16, max_norm=1)
+            self.linear_probe2 = LinearWithConstraint(n_patches * 16, 2, max_norm=0.25)
+        else:
+            # Aggregate the patch sequence with attention, as the upstream
+            # Sleep-EDF script does for its 120 patches. Drowsiness is not
+            # uniformly expressed across a window, so letting the head weigh
+            # instants is a different hypothesis from averaging them by a fixed
+            # projection -- and it is the head that dataset's authors chose.
+            self.linear_probe1 = LinearWithConstraint(EMBED_NUM * EMBED_DIM,
+                                                      args.head_dim, max_norm=1)
+            self.decoder = nn.TransformerDecoder(
+                decoder_layer=nn.TransformerDecoderLayer(
+                    args.head_dim, 4, args.head_dim * 4,
+                    activation=F.gelu, batch_first=False),
+                num_layers=args.head_layers)
+            self.cls_token = nn.Parameter(torch.rand(1, 1, args.head_dim) * 0.001)
+            self.register_buffer("pos_embed",
+                                 sinusoidal_embedding(n_patches, args.head_dim),
+                                 persistent=False)
+            self.linear_probe2 = LinearWithConstraint(args.head_dim, 2, max_norm=0.25)
 
         self.apply_strategy()
 
@@ -258,7 +291,12 @@ class LitEEGPTSADT(pl.LightningModule):
         else:
             z = self.target_encoder(x, self.chans_id.to(x))
         h = self.linear_probe1(self.drop(z.flatten(2)))
-        return self.linear_probe2(h.flatten(1))
+        if self.args.head == "flat":
+            return self.linear_probe2(h.flatten(1))
+        h = h + self.pos_embed.unsqueeze(0).to(h)
+        h = torch.cat([self.cls_token.repeat(h.shape[0], 1, 1).to(h), h], dim=1)
+        h = self.decoder(h.transpose(0, 1), h.transpose(0, 1))[0]
+        return self.linear_probe2(h)
 
     def training_step(self, batch, batch_idx):
         x, y = batch
@@ -393,6 +431,10 @@ def main():
     ap.add_argument("--no-tune-threshold", dest="tune_threshold", action="store_false",
                     help="report at a fixed 0.5 instead of the threshold that "
                          "maximises balanced accuracy on validation")
+    ap.add_argument("--head", default="flat", choices=["flat", "attn"],
+                    help="how the patch sequence is aggregated before classification")
+    ap.add_argument("--head-dim", type=int, default=64)
+    ap.add_argument("--head-layers", type=int, default=4)
     ap.add_argument("--valid-subjects", type=int, default=4,
                     help="subjects held out of training for validation")
     ap.add_argument("--batch-size", type=int, default=64)
