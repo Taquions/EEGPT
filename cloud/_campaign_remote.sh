@@ -19,12 +19,13 @@ COMMIT="@COMMIT@"
 STRATEGY="@STRATEGY@"
 FOLDS="@FOLDS@"
 EXTRA_ARGS="@EXTRA_ARGS@"
+DATASET="@DATASET@"
 
 LOG=/var/log/tg-campaign.log
 exec > >(tee -a "$LOG") 2>&1
 
 echo "=== campaign start $(date -Iseconds) ==="
-echo "strategy=$STRATEGY folds=$FOLDS commit=$COMMIT"
+echo "strategy=$STRATEGY folds=$FOLDS commit=$COMMIT dataset=$DATASET"
 
 # Any `exit 1` below is a setup failure: report it and stop paying, instead of
 # leaving the watcher polling a machine that will never produce a fold.
@@ -81,8 +82,11 @@ echo "code at $(git rev-parse --short HEAD)"
 mkdir -p checkpoint downstream/Data/BCIC_2a_0_38HZ datasets/downstream
 
 gcloud storage cp "gs://$BUCKET/checkpoints/eegpt_mcae_58chs_4s_large4E.ckpt" checkpoint/
-gcloud storage cp "gs://$BUCKET/datasets/sadt.tar" /tmp/
-tar -xf /tmp/sadt.tar -C datasets/downstream
+# The archive always unpacks to datasets/downstream/sadt, whatever variant it
+# holds, so the training script's default data path needs no knowledge of which
+# preprocessing produced it. Which one ran is recorded in the result JSON.
+gcloud storage cp "gs://$BUCKET/datasets/$DATASET" /tmp/dataset.tar
+tar -xf /tmp/dataset.tar -C datasets/downstream
 # Count with find rather than a glob, and report the total size: a shell glob
 # hides leading-dot files, and a name count alone would not notice a truncated
 # extraction.

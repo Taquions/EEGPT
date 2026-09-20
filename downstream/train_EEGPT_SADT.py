@@ -118,18 +118,28 @@ def load_subjects(data_dir):
                 f"could not read {path} ({os.path.getsize(path)} bytes): {exc}") from exc
         sub = int(blob["subject"])
         X, y = blob["X"], blob["y"]
+        # Preparations made before the intermediate trials were kept carry no
+        # ratio; a placeholder keeps the shapes aligned and is never read,
+        # because those files contain no label -1.
+        r = blob.get("ratio", torch.zeros(len(y), dtype=torch.float32))
+        # When the deviation onset happened, in seconds from the start of the
+        # session. Drowsiness is a slow state and a single 3 s window is a noisy
+        # sample of it, so keeping the timestamp lets predictions be smoothed
+        # over a neighbourhood offline, without another training run.
+        o = blob.get("onsets", torch.zeros(len(y), dtype=torch.float64))
         if sub in per_subject:
-            px, py = per_subject[sub]
-            per_subject[sub] = (torch.cat([px, X]), torch.cat([py, y]))
+            px, py, pr, po = per_subject[sub]
+            per_subject[sub] = (torch.cat([px, X]), torch.cat([py, y]),
+                                torch.cat([pr, r]), torch.cat([po, o]))
         else:
-            per_subject[sub] = (X, y)
+            per_subject[sub] = (X, y, r, o)
     return per_subject
 
 
 def usable_subjects(per_subject):
     """Subjects that can serve as a test fold, in ascending order."""
     out = []
-    for sub, (_, y) in sorted(per_subject.items()):
+    for sub, (_, y, _ratio, _onset) in sorted(per_subject.items()):
         n_alert = int((y == 0).sum())
         n_drowsy = int((y == 1).sum())
         if min(n_alert, n_drowsy) >= MIN_WINDOWS_PER_CLASS:
@@ -137,7 +147,8 @@ def usable_subjects(per_subject):
     return out
 
 
-def split_loso(per_subject, folds, fold_idx, n_valid_subjects, seed):
+def split_loso(per_subject, folds, fold_idx, n_valid_subjects, seed,
+               use_intermediate=False):
     """Hold out one subject for test and a few more for validation.
 
     The validation split is by subject rather than by window. Windows from the
@@ -155,12 +166,25 @@ def split_loso(per_subject, folds, fold_idx, n_valid_subjects, seed):
                                    replace=False).tolist())
     train_subs = [s for s in pool if s not in valid_subs]
 
-    def gather(subs):
-        Xs = [per_subject[s][0] for s in subs]
-        ys = [per_subject[s][1] for s in subs]
-        return torch.cat(Xs), torch.cat(ys)
+    def gather(subs, strict_only):
+        """Concatenate subjects, dropping intermediate trials when asked.
 
-    return (gather(train_subs), gather(valid_subs), per_subject[test_sub],
+        Validation and test always drop them. Selecting a configuration on, or
+        reporting a number over, a target that interpolates between the classes
+        would change what balanced accuracy means and break comparability with
+        every run so far and with the literature.
+        """
+        X = torch.cat([per_subject[s][0] for s in subs])
+        y = torch.cat([per_subject[s][1] for s in subs])
+        r = torch.cat([per_subject[s][2] for s in subs])
+        o = torch.cat([per_subject[s][3] for s in subs])
+        if strict_only:
+            keep = y >= 0
+            X, y, r, o = X[keep], y[keep], r[keep], o[keep]
+        return X, y, r, o
+
+    return (gather(train_subs, not use_intermediate),
+            gather(valid_subs, True), gather([test_sub], True),
             {"test": test_sub, "valid": valid_subs, "train": train_subs})
 
 
@@ -234,6 +258,7 @@ class LitEEGPTSADT(pl.LightningModule):
         # The drowsy class is the minority by roughly three to one, and balanced
         # accuracy is the metric, so the loss is weighted rather than the data
         # resampled -- resampling would duplicate windows that already overlap.
+        self.class_weight = class_weight
         self.loss_fn = nn.CrossEntropyLoss(weight=class_weight)
         self.threshold = 0.5
         self.valid_buffer = []
@@ -298,8 +323,25 @@ class LitEEGPTSADT(pl.LightningModule):
         h = self.decoder(h.transpose(0, 1), h.transpose(0, 1))[0]
         return self.linear_probe2(h)
 
+    def soft_loss(self, logit, target):
+        """Cross entropy against a probability rather than a class index.
+
+        Reduces exactly to the hard case when the target is 0 or 1, so the
+        strict trials contribute the same loss they always did and only the
+        intermediate ones behave differently.
+        """
+        logp = F.log_softmax(logit.float(), dim=-1)
+        w = self.class_weight.to(logit.device)
+        per_sample = -(target * w[1] * logp[:, 1] + (1 - target) * w[0] * logp[:, 0])
+        norm = target * w[1] + (1 - target) * w[0]
+        return per_sample.sum() / norm.sum().clamp(min=1e-8)
+
     def training_step(self, batch, batch_idx):
-        x, y = batch
+        x, y, ratio, _onset = batch
+        if self.args.use_intermediate:
+            loss = self.soft_loss(self.forward(x), soft_targets(y, ratio))
+            self.log("train_loss", loss, on_epoch=True, on_step=False)
+            return loss
         logit = self.forward(x)
         loss = self.loss_fn(logit, y.long())
         acc = (torch.argmax(logit, dim=-1) == y).float().mean()
@@ -311,7 +353,7 @@ class LitEEGPTSADT(pl.LightningModule):
         self.valid_buffer = []
 
     def validation_step(self, batch, batch_idx):
-        x, y = batch
+        x, y, _ratio, _onset = batch
         logit = self.forward(x)
         loss = self.loss_fn(logit, y.long())
         self.log("valid_loss", loss, on_epoch=True, on_step=False)
@@ -353,7 +395,7 @@ def collect_scores(model, loader, device):
     """Positive-class probability and label for every window in a loader."""
     model.eval().to(device)
     labels, scores = [], []
-    for x, y in loader:
+    for x, y, _ratio, _onset in loader:
         prob = F.softmax(model.forward(x.to(device)).float(), dim=-1)[:, 1]
         labels.append(y.cpu())
         scores.append(prob.cpu())
@@ -431,6 +473,10 @@ def main():
     ap.add_argument("--no-tune-threshold", dest="tune_threshold", action="store_false",
                     help="report at a fixed 0.5 instead of the threshold that "
                          "maximises balanced accuracy on validation")
+    ap.add_argument("--use-intermediate", action="store_true",
+                    help="train on the trials between the alert and drowsy thresholds "
+                         "with a soft target from the reaction-time ratio; validation "
+                         "and test always stay on the strict classes")
     ap.add_argument("--head", default="flat", choices=["flat", "attn"],
                     help="how the patch sequence is aggregated before classification")
     ap.add_argument("--head-dim", type=int, default=64)
@@ -472,17 +518,21 @@ def main():
         print(f"fold must be in [0, {len(folds)}); got {args.fold}", file=sys.stderr)
         return 2
 
-    (Xtr, ytr), (Xva, yva), (Xte, yte), who = split_loso(
-        per_subject, folds, args.fold, args.valid_subjects, args.seed)
+    (Xtr, ytr, rtr, _otr), (Xva, yva, rva, _ova), (Xte, yte, rte, ote), who = split_loso(
+        per_subject, folds, args.fold, args.valid_subjects, args.seed,
+        args.use_intermediate)
 
     n_times = Xtr.shape[2]
     print(f"strategy={args.strategy} fold={args.fold} test subject={who['test']}")
-    print(f"train {tuple(Xtr.shape)} ({int((ytr == 1).sum())} drowsy) | "
+    print(f"train {tuple(Xtr.shape)} ({int((ytr == 1).sum())} drowsy, "
+          f"{int((ytr < 0).sum())} intermediate) | "
           f"valid {tuple(Xva.shape)} ({int((yva == 1).sum())} drowsy) | "
           f"test {tuple(Xte.shape)} ({int((yte == 1).sum())} drowsy)")
     print(f"valid subjects {who['valid']}", flush=True)
 
-    counts = torch.bincount(ytr.long(), minlength=2).float()
+    # The intermediate trials carry label -1 and no class of their own; the
+    # weights are computed over the strict ones, which is what the loss weights.
+    counts = torch.bincount(ytr[ytr >= 0].long(), minlength=2).float()
     if args.balance in ("sampler", "both"):
         # Class weights only reshape the gradient; most batches still contain
         # almost no drowsy windows, which is what leaves the baseline predicting
@@ -490,18 +540,18 @@ def main():
         # the composition of the batch itself. Windows are drawn with
         # replacement, which is acceptable here because the minority class is
         # what gets repeated and the windows do not overlap in time.
-        weights = (1.0 / counts.clamp(min=1))[ytr.long()]
+        weights = (1.0 / counts.clamp(min=1))[ytr.clamp(min=0).long()]
         sampler = WeightedRandomSampler(weights.double(), len(weights), replacement=True)
-        train_loader = DataLoader(TensorDataset(Xtr, ytr), batch_size=args.batch_size,
+        train_loader = DataLoader(TensorDataset(Xtr, ytr, rtr, _otr), batch_size=args.batch_size,
                                   sampler=sampler, num_workers=args.num_workers,
                                   drop_last=True)
     else:
-        train_loader = DataLoader(TensorDataset(Xtr, ytr), batch_size=args.batch_size,
+        train_loader = DataLoader(TensorDataset(Xtr, ytr, rtr, _otr), batch_size=args.batch_size,
                                   shuffle=True, num_workers=args.num_workers,
                                   drop_last=True)
-    valid_loader = DataLoader(TensorDataset(Xva, yva), batch_size=args.batch_size,
+    valid_loader = DataLoader(TensorDataset(Xva, yva, rva, _ova), batch_size=args.batch_size,
                               shuffle=False, num_workers=args.num_workers)
-    test_loader = DataLoader(TensorDataset(Xte, yte), batch_size=args.batch_size,
+    test_loader = DataLoader(TensorDataset(Xte, yte, rte, ote), batch_size=args.batch_size,
                              shuffle=False, num_workers=args.num_workers)
 
     # Applying both the sampler and the weighted loss corrects the same
@@ -555,6 +605,12 @@ def main():
     results["threshold"] = threshold
     results["valid_balanced_accuracy"] = valid_results["balanced_accuracy"]
     results["valid_roc_auc"] = valid_results["roc_auc"]
+    # Per-window scores with their timestamps, so temporal smoothing can be
+    # explored offline. The application does not need a verdict every three
+    # seconds; it needs a state estimate over minutes.
+    results["per_window"] = {"onset": ote.tolist(),
+                             "label": test_label.astype(int).tolist(),
+                             "score": [round(float(v), 5) for v in test_score]}
     results["n_test"] = int(len(test_label))
     results["n_test_drowsy"] = int((test_label == 1).sum())
 

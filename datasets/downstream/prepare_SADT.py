@@ -261,6 +261,15 @@ def zscore_channelwise(X):
     return (X - mu) / np.maximum(sd, 1e-8)
 
 
+def load_allowed_onsets(ref_dir, stem):
+    """Deviation onsets kept by another variant, rounded to the millisecond."""
+    path = os.path.join(ref_dir, f"{stem}.pt")
+    if not os.path.exists(path):
+        return set()
+    blob = torch.load(path, map_location="cpu")
+    return {round(float(t), 3) for t in blob["onsets"]}
+
+
 def process_session(path, args):
     """Full pipeline for one session. Returns a summary dict."""
     subject, stem = parse_session(path)
@@ -269,6 +278,12 @@ def process_session(path, args):
 
     rejected = extract_trials(raw.annotations, traj, traj_sfreq, args)
     trials = rejected.pop("ok")
+
+    if args.restrict_to:
+        allowed = load_allowed_onsets(args.restrict_to, stem)
+        before = len(trials)
+        trials = [tr for tr in trials if round(tr[0], 3) in allowed]
+        rejected["restricted_out"] = before - len(trials)
     base = {"session": stem, "subject": subject, "n_trials": len(trials), **rejected}
 
     if len(trials) < args.min_trials:
@@ -305,6 +320,7 @@ def process_session(path, args):
         "subject": subject,
         "session": stem,
         "channels": channels,
+        "onsets": torch.from_numpy(times[idx].astype(np.float64)),
         "sfreq": SFREQ_OUT,
         "window_s": args.window_s,
     }, os.path.join(args.out, f"{stem}.pt"))
@@ -338,6 +354,17 @@ def main():
     ap.add_argument("--window-s", type=float, default=3.0,
                     help="window length in seconds, ending at the deviation onset "
                          "(default: 3, the convention in the literature on this dataset)")
+    ap.add_argument("--restrict-to", default=None,
+                    help="directory of another prepared variant; keep only the trials it "
+                         "kept. Window length and trial cohort otherwise move together, "
+                         "because the trajectory has to be flat over exactly the interval "
+                         "being cut -- a 5 s window rejects 10304 trials against 3939 at "
+                         "3 s. Decoupling the two instead would leave the extra EEG "
+                         "unverified, and a window reaching back into the previous "
+                         "correction carries that trial's motor response, whose reaction "
+                         "time the 90 s moving average has already written into this "
+                         "trial's label. Intersecting cohorts keeps the comparison honest "
+                         "without letting that leak in")
     ap.add_argument("--max-traj-std", type=float, default=0.3,
                     help="reject a trial whose pre-onset trajectory varies more than this "
                          "(lane units; the distribution is bimodal around ~0.05 and ~3)")

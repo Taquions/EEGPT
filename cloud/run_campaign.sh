@@ -32,6 +32,9 @@ REPO_URL="${REPO_URL:-https://github.com/Taquions/EEGPT.git}"
 GPU="${GPU:-l4}"
 SPOT="${SPOT:-1}"
 EXTRA="${EXTRA:-}"
+# Which prepared dataset the VM should pull. Variants differ in window length
+# or in whether the intermediate trials are included.
+DATASET="${DATASET:-sadt.tar}"
 # A hard ceiling on how long an instance may live, whatever happens to the job.
 # An idle VM that nobody notices is the most expensive failure available here:
 # one silently-never-started campaign cost seven hours of A100 before anyone
@@ -91,14 +94,20 @@ do_upload() {
     gcloud storage cp "$ckpt" "gs://$BUCKET/checkpoints/"
   fi
 
-  log "packing $(ls "$data"/*.pt | wc -l | tr -d ' ') session files"
+  data="${DATA_DIR:-$data}"
+  log "packing $(ls "$data"/*.pt | wc -l | tr -d ' ') session files from $(basename "$data")"
   # COPYFILE_DISABLE stops macOS tar from attaching extended-attribute headers
   # that GNU tar on the VM then warns about for every single member.
-  COPYFILE_DISABLE=1 tar -cf "$SCRIPT_DIR/sadt.tar" \
-    -C "$REPO_ROOT/datasets/downstream" sadt
-  log "uploading data ($(du -h "$SCRIPT_DIR/sadt.tar" | cut -f1))"
-  gcloud storage cp "$SCRIPT_DIR/sadt.tar" "gs://$BUCKET/datasets/"
-  rm -f "$SCRIPT_DIR/sadt.tar"
+  # Packed under the name sadt/ whatever the source directory is called, so the
+  # training script's default path works for every variant.
+  # -s is bsdtar's rename flag; GNU tar spells it --transform. macOS ships
+  # bsdtar, and the VM only ever sees the result.
+  COPYFILE_DISABLE=1 tar -cf "$SCRIPT_DIR/$DATASET" \
+    -C "$REPO_ROOT/datasets/downstream" -s "|^$(basename "$data")|sadt|" \
+    "$(basename "$data")"
+  log "uploading $DATASET ($(du -h "$SCRIPT_DIR/$DATASET" | cut -f1))"
+  gcloud storage cp "$SCRIPT_DIR/$DATASET" "gs://$BUCKET/datasets/"
+  rm -f "$SCRIPT_DIR/$DATASET"
   log "upload done"
 }
 
@@ -116,7 +125,7 @@ do_run() {
     echo "commit $commit is not on any remote -- push first" >&2
     exit 1
   fi
-  log "strategy=$strategy folds=[$spec] commit=${commit:0:8} gpu=$GPU spot=$SPOT"
+  log "strategy=$strategy folds=[$spec] commit=${commit:0:8} gpu=$GPU spot=$SPOT dataset=$DATASET"
 
   # Clear this strategy's sentinels: a stale one from a previous attempt makes
   # the monitor report a verdict seconds after launch, for a run that has not
@@ -129,6 +138,7 @@ do_run() {
   sed -e "s|@BUCKET@|$BUCKET|g" -e "s|@REPO@|$REPO_URL|g" \
       -e "s|@COMMIT@|$commit|g" -e "s|@STRATEGY@|$strategy|g" \
       -e "s|@FOLDS@|$folds|g" -e "s|@EXTRA_ARGS@|$EXTRA|g" \
+      -e "s|@DATASET@|$DATASET|g" \
       "$SCRIPT_DIR/_campaign_remote.sh" > "$remote"
 
   # Expanded with the ${a[@]+...} guard below: under `set -u`, bash 3.2 (which is
