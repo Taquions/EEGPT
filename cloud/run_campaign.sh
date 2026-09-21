@@ -149,7 +149,12 @@ do_run() {
   # attention head and a flat head are both `linear`), so the strategy alone
   # does not identify a run. Keying sentinels and logs by the suffix as well
   # keeps one campaign from reporting the other's verdict.
-  local suffix; suffix="$(printf '%s' "$EXTRA" | grep -o -- '--tag-suffix[= ][^ ]*' | sed 's/.*[= ]//')"
+  # head -1 because an ablation passes several ';'-separated configs, each with
+  # its own suffix. Without it the run identifier becomes multi-line and the
+  # sed that renders the remote script dies on "unescaped newline inside
+  # substitute pattern". The first suffix is enough to name the campaign; the
+  # per-fold results are still keyed by their own config's suffix.
+  local suffix; suffix="$(printf '%s' "$EXTRA" | grep -o -- '--tag-suffix[= ][^ ]*' | sed 's/.*[= ]//' | head -1)"
   local runid="${strategy}${suffix}"
   gcloud storage rm "gs://$BUCKET/sentinels/${runid}_DONE_OK.txt" \
     "gs://$BUCKET/sentinels/${runid}_DONE_FAIL.txt" 2>/dev/null || true
