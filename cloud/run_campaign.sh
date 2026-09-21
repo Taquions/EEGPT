@@ -142,14 +142,24 @@ do_run() {
   # the monitor report a verdict seconds after launch, for a run that has not
   # started. Per-fold results are deliberately left in place -- they are what
   # lets a resumed campaign skip the folds it already has.
-  gcloud storage rm "gs://$BUCKET/sentinels/${strategy}_DONE_OK.txt" \
-    "gs://$BUCKET/sentinels/${strategy}_DONE_FAIL.txt" 2>/dev/null || true
+  # Two campaigns can share a strategy and differ only in --tag-suffix (an
+  # attention head and a flat head are both `linear`), so the strategy alone
+  # does not identify a run. Keying sentinels and logs by the suffix as well
+  # keeps one campaign from reporting the other's verdict.
+  local suffix; suffix="$(printf '%s' "$EXTRA" | grep -o -- '--tag-suffix[= ][^ ]*' | sed 's/.*[= ]//')"
+  local runid="${strategy}${suffix}"
+  gcloud storage rm "gs://$BUCKET/sentinels/${runid}_DONE_OK.txt" \
+    "gs://$BUCKET/sentinels/${runid}_DONE_FAIL.txt" 2>/dev/null || true
 
-  local remote="$SCRIPT_DIR/.campaign_remote.rendered.sh"
+  # Unique per launch: concurrent campaigns rendering into one fixed filename
+  # raced, and the first to finish deleted the file the others were about to
+  # copy ("stat local .campaign_remote.rendered.sh: No such file or directory"),
+  # leaving their VMs running with nothing to do.
+  local remote; remote="$(mktemp "$SCRIPT_DIR/.campaign_remote.XXXXXX.sh")"
   sed -e "s|@BUCKET@|$BUCKET|g" -e "s|@REPO@|$REPO_URL|g" \
       -e "s|@COMMIT@|$commit|g" -e "s|@STRATEGY@|$strategy|g" \
       -e "s|@FOLDS@|$folds|g" -e "s|@EXTRA_ARGS@|$EXTRA|g" \
-      -e "s|@DATASET@|$DATASET|g" \
+      -e "s|@DATASET@|$DATASET|g" -e "s|@RUNID@|$runid|g" \
       "$SCRIPT_DIR/_campaign_remote.sh" > "$remote"
 
   # Expanded with the ${a[@]+...} guard below: under `set -u`, bash 3.2 (which is

@@ -20,6 +20,9 @@ STRATEGY="@STRATEGY@"
 FOLDS="@FOLDS@"
 EXTRA_ARGS="@EXTRA_ARGS@"
 DATASET="@DATASET@"
+# Identifies this campaign where the strategy alone would not: two runs can
+# share a strategy and differ only in --tag-suffix.
+RUNID="@RUNID@"
 
 LOG=/var/log/tg-campaign.log
 exec > >(tee -a "$LOG") 2>&1
@@ -32,9 +35,9 @@ echo "strategy=$STRATEGY folds=$FOLDS commit=$COMMIT dataset=$DATASET"
 on_exit() {
   local rc=$?
   if [ "$rc" != "0" ]; then
-    gcloud storage cp "$LOG" "gs://$BUCKET/logs/campaign_$STRATEGY.log" || true
+    gcloud storage cp "$LOG" "gs://$BUCKET/logs/campaign_$RUNID.log" || true
     echo "setup failed rc=$rc $(date -Iseconds)" | \
-      gcloud storage cp - "gs://$BUCKET/sentinels/${STRATEGY}_DONE_FAIL.txt" || true
+      gcloud storage cp - "gs://$BUCKET/sentinels/${RUNID}_DONE_FAIL.txt" || true
     shutdown -h +2 "setup failed" || true
   fi
 }
@@ -131,21 +134,21 @@ for FOLD in $FOLDS; do
     FAILED=$((FAILED + 1))
     echo "=== $TAG FAILED rc=$RC $(date -Iseconds) ==="
   fi
-  gcloud storage cp "$LOG" "gs://$BUCKET/logs/campaign_$STRATEGY.log" || true
+  gcloud storage cp "$LOG" "gs://$BUCKET/logs/campaign_$RUNID.log" || true
 done
 done
 
 # --- finish ---------------------------------------------------------------
 
-gcloud storage cp --recursive results_sadt "gs://$BUCKET/logs/lightning_$STRATEGY/" || true
-gcloud storage cp "$LOG" "gs://$BUCKET/logs/campaign_$STRATEGY.log" || true
+gcloud storage cp --recursive results_sadt "gs://$BUCKET/logs/lightning_$RUNID/" || true
+gcloud storage cp "$LOG" "gs://$BUCKET/logs/campaign_$RUNID.log" || true
 
 if [ "$FAILED" = "0" ]; then
   echo "all folds ok $(date -Iseconds)" | \
-    gcloud storage cp - "gs://$BUCKET/sentinels/${STRATEGY}_DONE_OK.txt"
+    gcloud storage cp - "gs://$BUCKET/sentinels/${RUNID}_DONE_OK.txt"
 else
   echo "$FAILED folds failed $(date -Iseconds)" | \
-    gcloud storage cp - "gs://$BUCKET/sentinels/${STRATEGY}_DONE_FAIL.txt"
+    gcloud storage cp - "gs://$BUCKET/sentinels/${RUNID}_DONE_FAIL.txt"
 fi
 
 echo "=== campaign end $(date -Iseconds), $FAILED failures ==="
