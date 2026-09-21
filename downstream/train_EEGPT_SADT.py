@@ -298,6 +298,7 @@ class LitEEGPTSADT(pl.LightningModule):
         self.class_weight = class_weight
         self.loss_fn = nn.CrossEntropyLoss(weight=class_weight)
         self.threshold = 0.5
+        self.tta_stats = None
         self.valid_buffer = []
         self.is_sanity = True
 
@@ -344,6 +345,13 @@ class LitEEGPTSADT(pl.LightningModule):
     def encoder_trainable(self):
         return [p for p in self.target_encoder.parameters() if p.requires_grad]
 
+    def features(self, x):
+        """Encoder output for a batch, before any test-time rescaling."""
+        x = self.chan_conv(x)
+        self.target_encoder.eval()
+        with torch.no_grad():
+            return self.target_encoder(x, self.chans_id.to(x)).flatten(2)
+
     def forward(self, x):
         x = self.chan_conv(x)
         if self.args.strategy == "linear":
@@ -352,7 +360,19 @@ class LitEEGPTSADT(pl.LightningModule):
                 z = self.target_encoder(x, self.chans_id.to(x))
         else:
             z = self.target_encoder(x, self.chans_id.to(x))
-        h = self.linear_probe1(self.drop(z.flatten(2)))
+        f = z.flatten(2)
+        if self.tta_stats is not None:
+            # Map this subject's feature distribution onto the training pool's.
+            # The labelling rule already measures reaction time against each
+            # session's own baseline, so the target is subject-relative; the
+            # encoder's output is not. Two equally drowsy people give different
+            # amplitudes, rhythms and electrode contact, so their scores land on
+            # different scales and a single threshold cannot suit both. This
+            # rescales per feature and uses no labels -- only the unlabelled
+            # windows of the subject being tested, which a deployment has.
+            mu_s, sd_s, mu_t, sd_t = self.tta_stats
+            f = (f - mu_t.to(f)) / sd_t.to(f) * sd_s.to(f) + mu_s.to(f)
+        h = self.linear_probe1(self.drop(f))
         if self.args.head == "flat":
             return self.linear_probe2(h.flatten(1))
         h = h + self.pos_embed.unsqueeze(0).to(h)
@@ -428,14 +448,39 @@ class LitEEGPTSADT(pl.LightningModule):
 # --- evaluation --------------------------------------------------------------
 
 @torch.no_grad()
+def feature_stats(model, loader, device):
+    """Mean and standard deviation of the encoder's output, per feature.
+
+    Pooled over windows and over patches: a subject's recording conditions
+    shift the whole representation, not one patch of it.
+    """
+    model.eval().to(device)
+    total = sq = None
+    n = 0
+    with torch.no_grad():
+        for x, _y, _ratio, _onset in loader:
+            f = model.features(x.to(device)).float().flatten(0, 1)
+            total = f.sum(0) if total is None else total + f.sum(0)
+            sq = (f * f).sum(0) if sq is None else sq + (f * f).sum(0)
+            n += f.shape[0]
+    mu = total / n
+    var = (sq / n - mu * mu).clamp(min=1e-8)
+    return mu.cpu(), var.sqrt().cpu()
+
+
 def collect_scores(model, loader, device):
     """Positive-class probability and label for every window in a loader."""
     model.eval().to(device)
     labels, scores = [], []
-    for x, y, _ratio, _onset in loader:
-        prob = F.softmax(model.forward(x.to(device)).float(), dim=-1)[:, 1]
-        labels.append(y.cpu())
-        scores.append(prob.cpu())
+    # Without no_grad the head's parameters make every score carry a graph, so
+    # the concatenation cannot be handed to numpy and the whole fold dies after
+    # training has already been paid for. It also keeps inference from building
+    # activations it will never use.
+    with torch.no_grad():
+        for x, y, _ratio, _onset in loader:
+            prob = F.softmax(model.forward(x.to(device)).float(), dim=-1)[:, 1]
+            labels.append(y.cpu())
+            scores.append(prob.cpu())
     return torch.cat(labels).numpy(), torch.cat(scores).numpy()
 
 
@@ -529,6 +574,10 @@ def main():
     ap.add_argument("--precision", default="16-mixed")
     ap.add_argument("--accelerator", default="auto")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--tta", choices=["none", "featnorm"], default="none",
+                    help="test-time adaptation. 'featnorm' rescales the held-out "
+                         "subject's encoder features onto the training pool's "
+                         "statistics, using no labels")
     ap.add_argument("--tag-suffix", default="",
                     help="appended to the result filename, to keep ablation runs apart")
     ap.add_argument("--fast-dev-run", action="store_true",
@@ -632,6 +681,15 @@ def main():
     valid_label, valid_score = collect_scores(model, valid_loader, device)
     threshold = pick_threshold(valid_label, valid_score) if args.tune_threshold else 0.5
     valid_results = score_at(valid_label, valid_score, threshold)
+
+    if args.tta == "featnorm":
+        # Source statistics come from the training pool and target statistics
+        # from the held-out subject's own windows, with no labels read. The
+        # threshold stays the one validation picked: this adapts the features,
+        # not the decision rule, so the two effects remain separable.
+        mu_s, sd_s = feature_stats(model, train_loader, device)
+        mu_t, sd_t = feature_stats(model, test_loader, device)
+        model.tta_stats = (mu_s, sd_s, mu_t, sd_t)
 
     test_label, test_score = collect_scores(model, test_loader, device)
     results = score_at(test_label, test_score, threshold)
