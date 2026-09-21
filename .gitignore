@@ -40,6 +40,6 @@ events.out.tfevents.*
 *.bak
 
 # Runtime state written by cloud/run_campaign.sh
-cloud/.campaign_zone
-cloud/.campaign_remote.*.sh
+cloud/.campaign_zone.*
+cloud/.campaign_remote.*
 cloud/sadt.tar

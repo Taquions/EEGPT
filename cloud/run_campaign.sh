@@ -44,7 +44,10 @@ MAX_RUN="${MAX_RUN:-4h}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VM_NAME="${VM_NAME:-eegpt-sadt-campaign}"
-ZONE_FILE="$SCRIPT_DIR/.campaign_zone"
+# Per VM: one shared cache file made a second campaign read the first
+# campaign's zone, fail to find its own VM there, and try to create a machine
+# that was already running and idle.
+ZONE_FILE="$SCRIPT_DIR/.campaign_zone.$VM_NAME"
 
 case "$GPU" in
   l4)   MACHINE="g2-standard-8";  ZONES="${ZONES:-us-central1-a us-central1-b us-central1-c}" ;;
@@ -155,7 +158,7 @@ do_run() {
   # raced, and the first to finish deleted the file the others were about to
   # copy ("stat local .campaign_remote.rendered.sh: No such file or directory"),
   # leaving their VMs running with nothing to do.
-  local remote; remote="$(mktemp "$SCRIPT_DIR/.campaign_remote.XXXXXX.sh")"
+  local remote; remote="$(mktemp "$SCRIPT_DIR/.campaign_remote.XXXXXX")"
   sed -e "s|@BUCKET@|$BUCKET|g" -e "s|@REPO@|$REPO_URL|g" \
       -e "s|@COMMIT@|$commit|g" -e "s|@STRATEGY@|$strategy|g" \
       -e "s|@FOLDS@|$folds|g" -e "s|@EXTRA_ARGS@|$EXTRA|g" \
