@@ -77,6 +77,30 @@ DEPTH = 8
 SESSION_TIME_STRIDE_S = 86400.0
 MIN_WINDOWS_PER_CLASS = 1
 
+# The two reaction-time ratios the labelling rule uses as thresholds: below the
+# first a trial is alert, above the second it is drowsy, and between them it is
+# neither and gets dropped. Kept in step with prepare_SADT.py.
+ALERT_RATIO = 1.5
+DROWSY_RATIO = 2.5
+
+
+def soft_targets(y, ratio):
+    """Turn labels into drowsiness probabilities, interpolating the middle.
+
+    A strict trial keeps its own label exactly, so it contributes the loss it
+    always did. An intermediate trial -- labelled -1 because its reaction time
+    falls between the two thresholds -- gets a target that slides linearly from
+    0 at the alert threshold to 1 at the drowsy one. That is the whole point of
+    keeping them: their reaction times say something about drowsiness, just not
+    enough to justify a hard label, and a hard label is the only thing the
+    original rule knows how to assign.
+
+    The interpolation is clamped, so a ratio outside the thresholds cannot push
+    a target past 0 or 1 through a rounding difference against prepare_SADT.py.
+    """
+    soft = ((ratio - ALERT_RATIO) / (DROWSY_RATIO - ALERT_RATIO)).clamp(0.0, 1.0)
+    return torch.where(y >= 0, y.to(soft.dtype), soft)
+
 
 def sinusoidal_embedding(length, dim):
     """Absolute sin/cos positional encoding, as used by the upstream head."""
