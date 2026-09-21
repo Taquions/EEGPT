@@ -106,7 +106,18 @@ do_upload() {
     -C "$REPO_ROOT/datasets/downstream" -s "|^$(basename "$data")|sadt|" \
     "$(basename "$data")"
   log "uploading $DATASET ($(du -h "$SCRIPT_DIR/$DATASET" | cut -f1))"
-  gcloud storage cp "$SCRIPT_DIR/$DATASET" "gs://$BUCKET/datasets/"
+  # A composite upload can fail halfway ("Temporary components were not uploaded
+  # correctly") and still leave the caller believing it worked. Keep the tar on
+  # failure so a retry does not have to repack two gigabytes, and verify the
+  # object is really there before saying the upload is done.
+  if ! gcloud storage cp "$SCRIPT_DIR/$DATASET" "gs://$BUCKET/datasets/"; then
+    echo "upload of $DATASET failed; the local tar is kept at $SCRIPT_DIR/$DATASET" >&2
+    exit 1
+  fi
+  gcloud storage ls "gs://$BUCKET/datasets/$DATASET" >/dev/null || {
+    echo "upload reported success but gs://$BUCKET/datasets/$DATASET is absent" >&2
+    exit 1
+  }
   rm -f "$SCRIPT_DIR/$DATASET"
   log "upload done"
 }

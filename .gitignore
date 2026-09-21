@@ -15,6 +15,9 @@ checkpoint/
 datasets/downstream/sleep_edf/
 datasets/downstream/sadt_raw/
 datasets/downstream/sadt/
+datasets/downstream/sadt_ts/
+datasets/downstream/sadt_full/
+datasets/downstream/sadt_full_ts/
 datasets/pretrain/data/
 downstream/Data/
 *.set

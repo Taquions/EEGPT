@@ -21,6 +21,7 @@ Usage
 """
 
 import argparse
+import collections
 import json
 import os
 import random
@@ -71,6 +72,9 @@ DEPTH = 8
 
 # A subject needs both classes present to have a defined balanced accuracy, so
 # one with an empty class cannot serve as a test fold at all.
+# Sessions last about 90 minutes. Spacing them a day apart on the synthetic
+# timeline guarantees no smoothing window can ever span two recordings.
+SESSION_TIME_STRIDE_S = 86400.0
 MIN_WINDOWS_PER_CLASS = 1
 
 
@@ -107,6 +111,7 @@ def load_subjects(data_dir):
     stray one would be counted as fine by the setup log and then fail here.
     """
     per_subject = {}
+    session_index = collections.defaultdict(int)
     for name in sorted(os.listdir(data_dir)):
         if not name.endswith(".pt") or name.startswith("."):
             continue
@@ -127,6 +132,14 @@ def load_subjects(data_dir):
         # sample of it, so keeping the timestamp lets predictions be smoothed
         # over a neighbourhood offline, without another training run.
         o = blob.get("onsets", torch.zeros(len(y), dtype=torch.float64))
+        # Onsets count from the start of their own session, so two sessions of
+        # the same subject both begin near zero. Concatenated as they are, a
+        # window from the second session would land in the temporal
+        # neighbourhood of one from the first, and smoothing would average
+        # across recordings made months apart. Pushing each session onto its own
+        # stretch of the timeline keeps neighbourhoods inside one recording.
+        o = o + SESSION_TIME_STRIDE_S * session_index[sub]
+        session_index[sub] += 1
         if sub in per_subject:
             px, py, pr, po = per_subject[sub]
             per_subject[sub] = (torch.cat([px, X]), torch.cat([py, y]),
