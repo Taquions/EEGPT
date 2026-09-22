@@ -102,6 +102,24 @@ def soft_targets(y, ratio):
     return torch.where(y >= 0, y.to(soft.dtype), soft)
 
 
+class GradientReversal(torch.autograd.Function):
+    """Identity forward, sign-flipped gradient backward.
+
+    Lets one optimiser minimise the subject classifier's loss while the layers
+    below it maximise the same loss, so the representation is pushed towards
+    discarding whatever identifies the subject.
+    """
+
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = lambd
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return -ctx.lambd * grad, None
+
+
 def sinusoidal_embedding(length, dim):
     """Absolute sin/cos positional encoding, as used by the upstream head."""
     pos = torch.arange(length, dtype=torch.float32).unsqueeze(1)
@@ -215,10 +233,14 @@ def split_loso(per_subject, folds, fold_idx, n_valid_subjects, seed,
         y = torch.cat([per_subject[s][1] for s in subs])
         r = torch.cat([per_subject[s][2] for s in subs])
         o = torch.cat([per_subject[s][3] for s in subs])
+        # Position within `subs`, not the subject number: the adversary needs a
+        # dense class index, and the training pool changes with the fold.
+        g = torch.cat([torch.full((len(per_subject[s][1]),), i, dtype=torch.long)
+                       for i, s in enumerate(subs)])
         if strict_only:
             keep = y >= 0
-            X, y, r, o = X[keep], y[keep], r[keep], o[keep]
-        return X, y, r, o
+            X, y, r, o, g = X[keep], y[keep], r[keep], o[keep], g[keep]
+        return X, y, r, o, g
 
     return (gather(train_subs, not use_intermediate),
             gather(valid_subs, True), gather([test_sub], True),
@@ -297,6 +319,13 @@ class LitEEGPTSADT(pl.LightningModule):
         # resampled -- resampling would duplicate windows that already overlap.
         self.class_weight = class_weight
         self.loss_fn = nn.CrossEntropyLoss(weight=class_weight)
+        # One output per training subject. The head is ordinary; what makes it
+        # adversarial is the reversed gradient reaching the layers below.
+        pooled_dim = (args.head_dim if args.head == "attn"
+                      else n_patches * 16)
+        self.subject_head = (nn.Linear(pooled_dim, args.n_train_subjects)
+                             if args.adv_lambda > 0 else None)
+        self.last_pooled = None
         self.threshold = 0.5
         self.tta_stats = None
         self.valid_buffer = []
@@ -374,10 +403,12 @@ class LitEEGPTSADT(pl.LightningModule):
             f = (f - mu_t.to(f)) / sd_t.to(f) * sd_s.to(f) + mu_s.to(f)
         h = self.linear_probe1(self.drop(f))
         if self.args.head == "flat":
-            return self.linear_probe2(h.flatten(1))
+            self.last_pooled = h.flatten(1)
+            return self.linear_probe2(self.last_pooled)
         h = h + self.pos_embed.unsqueeze(0).to(h)
         h = torch.cat([self.cls_token.repeat(h.shape[0], 1, 1).to(h), h], dim=1)
         h = self.decoder(h.transpose(0, 1), h.transpose(0, 1))[0]
+        self.last_pooled = h
         return self.linear_probe2(h)
 
     def soft_loss(self, logit, target):
@@ -393,24 +424,46 @@ class LitEEGPTSADT(pl.LightningModule):
         norm = target * w[1] + (1 - target) * w[0]
         return per_sample.sum() / norm.sum().clamp(min=1e-8)
 
+    def adversarial_term(self, subj):
+        """Loss that punishes the representation for revealing who the subject is.
+
+        The gradient reaching the layers below is sign-flipped, so they learn to
+        make the subject unrecognisable while this classifier learns to
+        recognise it. The intent is a representation carrying drowsiness and not
+        identity -- which is the shift the per-subject diagnosis points at, and
+        the same one test-time alignment attacks from the other end.
+
+        Ramped in over training rather than applied from the first step: an
+        adversary fighting a representation that has not learned anything yet
+        only adds noise.
+        """
+        progress = min(1.0, (self.current_epoch + 1) / max(1, self.args.adv_warmup))
+        lambd = self.args.adv_lambda * progress
+        rev = GradientReversal.apply(self.last_pooled, lambd)
+        return F.cross_entropy(self.subject_head(rev), subj), lambd
+
     def training_step(self, batch, batch_idx):
-        x, y, ratio, _onset = batch
+        x, y, ratio, _onset, subj = batch
         if self.args.use_intermediate:
             loss = self.soft_loss(self.forward(x), soft_targets(y, ratio))
-            self.log("train_loss", loss, on_epoch=True, on_step=False)
-            return loss
-        logit = self.forward(x)
-        loss = self.loss_fn(logit, y.long())
-        acc = (torch.argmax(logit, dim=-1) == y).float().mean()
+        else:
+            logit = self.forward(x)
+            loss = self.loss_fn(logit, y.long())
+            self.log("train_acc", (torch.argmax(logit, dim=-1) == y).float().mean(),
+                     on_epoch=True, on_step=False)
+        if self.args.adv_lambda > 0:
+            adv, lambd = self.adversarial_term(subj)
+            self.log("adv_loss", adv, on_epoch=True, on_step=False)
+            self.log("adv_lambda", lambd, on_epoch=True, on_step=False)
+            loss = loss + adv
         self.log("train_loss", loss, on_epoch=True, on_step=False)
-        self.log("train_acc", acc, on_epoch=True, on_step=False)
         return loss
 
     def on_validation_epoch_start(self):
         self.valid_buffer = []
 
     def validation_step(self, batch, batch_idx):
-        x, y, _ratio, _onset = batch
+        x, y, _ratio, _onset, _subj = batch
         logit = self.forward(x)
         loss = self.loss_fn(logit, y.long())
         self.log("valid_loss", loss, on_epoch=True, on_step=False)
@@ -429,7 +482,12 @@ class LitEEGPTSADT(pl.LightningModule):
             self.log("valid_" + key, value, on_epoch=True, on_step=False)
 
     def configure_optimizers(self):
-        groups = [{"params": self.head_parameters(), "lr": self.args.lr_head}]
+        head = list(self.head_parameters())
+        if self.subject_head is not None:
+            # Trained by the same optimiser: it descends its own loss while the
+            # reversal makes the layers below ascend it.
+            head = head + list(self.subject_head.parameters())
+        groups = [{"params": head, "lr": self.args.lr_head}]
         enc = self.encoder_trainable()
         if enc:
             groups.append({"params": enc, "lr": self.args.lr_encoder})
@@ -458,7 +516,7 @@ def feature_stats(model, loader, device):
     total = sq = None
     n = 0
     with torch.no_grad():
-        for x, _y, _ratio, _onset in loader:
+        for x, _y, _ratio, _onset, _subj in loader:
             f = model.features(x.to(device)).float().flatten(0, 1)
             total = f.sum(0) if total is None else total + f.sum(0)
             sq = (f * f).sum(0) if sq is None else sq + (f * f).sum(0)
@@ -468,7 +526,43 @@ def feature_stats(model, loader, device):
     return mu.cpu(), var.sqrt().cpu()
 
 
-def collect_scores(model, loader, device):
+def collect_logits(model, loader, device):
+    """Raw logits and labels, for fitting a calibration temperature."""
+    model.eval().to(device)
+    logits, labels = [], []
+    with torch.no_grad():
+        for x, y, _ratio, _onset, _subj in loader:
+            logits.append(model.forward(x.to(device)).float().cpu())
+            labels.append(y.cpu())
+    return torch.cat(logits), torch.cat(labels)
+
+
+def fit_temperature(logit, label):
+    """Single scalar dividing the logits, fitted by negative log likelihood.
+
+    Temperature scaling (Guo et al., 2017) cannot reorder anything, so AUROC is
+    untouched by construction; it only changes how spread the probabilities are.
+    That is the point here: every attempt to move the threshold has failed, and
+    the remaining hypothesis is that the scores are not probabilities at all --
+    training with class weights distorts their scale -- so a fixed 0.5 sits in
+    the wrong place. This fixes the scale instead of chasing the cut.
+
+    Fitted on validation subjects, who are disjoint from the test subject.
+    """
+    t = torch.ones(1, requires_grad=True)
+    opt = torch.optim.LBFGS([t], lr=0.1, max_iter=100)
+
+    def closure():
+        opt.zero_grad()
+        loss = F.cross_entropy(logit / t.clamp(min=1e-2), label.long())
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+    return float(t.detach().clamp(min=1e-2))
+
+
+def collect_scores(model, loader, device, temperature=1.0):
     """Positive-class probability and label for every window in a loader."""
     model.eval().to(device)
     labels, scores = [], []
@@ -477,8 +571,8 @@ def collect_scores(model, loader, device):
     # training has already been paid for. It also keeps inference from building
     # activations it will never use.
     with torch.no_grad():
-        for x, y, _ratio, _onset in loader:
-            prob = F.softmax(model.forward(x.to(device)).float(), dim=-1)[:, 1]
+        for x, y, _ratio, _onset, _subj in loader:
+            prob = F.softmax(model.forward(x.to(device)).float() / temperature, dim=-1)[:, 1]
             labels.append(y.cpu())
             scores.append(prob.cpu())
     return torch.cat(labels).numpy(), torch.cat(scores).numpy()
@@ -578,6 +672,12 @@ def main():
                     help="test-time adaptation. 'featnorm' rescales the held-out "
                          "subject's encoder features onto the training pool's "
                          "statistics, using no labels")
+    ap.add_argument("--calibrate", choices=["none", "temperature"], default="none",
+                    help="fit a calibration temperature on the validation subjects")
+    ap.add_argument("--adv-lambda", type=float, default=0.0,
+                    help="weight of the adversarial subject classifier; 0 disables it")
+    ap.add_argument("--adv-warmup", type=int, default=5,
+                    help="epochs over which the adversarial weight ramps to full")
     ap.add_argument("--tag-suffix", default="",
                     help="appended to the result filename, to keep ablation runs apart")
     ap.add_argument("--fast-dev-run", action="store_true",
@@ -604,7 +704,7 @@ def main():
         print(f"fold must be in [0, {len(folds)}); got {args.fold}", file=sys.stderr)
         return 2
 
-    (Xtr, ytr, rtr, _otr), (Xva, yva, rva, _ova), (Xte, yte, rte, ote), who = split_loso(
+    (Xtr, ytr, rtr, _otr, gtr), (Xva, yva, rva, _ova, gva), (Xte, yte, rte, ote, gte), who = split_loso(
         per_subject, folds, args.fold, args.valid_subjects, args.seed,
         args.use_intermediate)
 
@@ -628,16 +728,16 @@ def main():
         # what gets repeated and the windows do not overlap in time.
         weights = (1.0 / counts.clamp(min=1))[ytr.clamp(min=0).long()]
         sampler = WeightedRandomSampler(weights.double(), len(weights), replacement=True)
-        train_loader = DataLoader(TensorDataset(Xtr, ytr, rtr, _otr), batch_size=args.batch_size,
+        train_loader = DataLoader(TensorDataset(Xtr, ytr, rtr, _otr, gtr), batch_size=args.batch_size,
                                   sampler=sampler, num_workers=args.num_workers,
                                   drop_last=True)
     else:
-        train_loader = DataLoader(TensorDataset(Xtr, ytr, rtr, _otr), batch_size=args.batch_size,
+        train_loader = DataLoader(TensorDataset(Xtr, ytr, rtr, _otr, gtr), batch_size=args.batch_size,
                                   shuffle=True, num_workers=args.num_workers,
                                   drop_last=True)
-    valid_loader = DataLoader(TensorDataset(Xva, yva, rva, _ova), batch_size=args.batch_size,
+    valid_loader = DataLoader(TensorDataset(Xva, yva, rva, _ova, gva), batch_size=args.batch_size,
                               shuffle=False, num_workers=args.num_workers)
-    test_loader = DataLoader(TensorDataset(Xte, yte, rte, ote), batch_size=args.batch_size,
+    test_loader = DataLoader(TensorDataset(Xte, yte, rte, ote, gte), batch_size=args.batch_size,
                              shuffle=False, num_workers=args.num_workers)
 
     # Applying both the sampler and the weighted loss corrects the same
@@ -648,6 +748,9 @@ def main():
         class_weight = torch.ones(2)
     print(f"balance={args.balance} class weights {class_weight.tolist()}")
 
+    # The adversary needs one output per training subject, and the pool size
+    # depends on the fold, so it is settled here rather than on the command line.
+    args.n_train_subjects = len(who["train"])
     model = LitEEGPTSADT(args, n_times, class_weight, max(len(train_loader), 1))
     n_head = sum(p.numel() for p in model.head_parameters())
     n_enc = sum(p.numel() for p in model.encoder_trainable())
@@ -678,7 +781,13 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    valid_label, valid_score = collect_scores(model, valid_loader, device)
+    temperature = 1.0
+    if args.calibrate == "temperature":
+        vlogit, vlabel = collect_logits(model, valid_loader, device)
+        temperature = fit_temperature(vlogit, vlabel)
+        print(f"temperature fitted on validation: {temperature:.3f}")
+
+    valid_label, valid_score = collect_scores(model, valid_loader, device, temperature)
     threshold = pick_threshold(valid_label, valid_score) if args.tune_threshold else 0.5
     valid_results = score_at(valid_label, valid_score, threshold)
 
@@ -691,13 +800,14 @@ def main():
         mu_t, sd_t = feature_stats(model, test_loader, device)
         model.tta_stats = (mu_s, sd_s, mu_t, sd_t)
 
-    test_label, test_score = collect_scores(model, test_loader, device)
+    test_label, test_score = collect_scores(model, test_loader, device, temperature)
     results = score_at(test_label, test_score, threshold)
     # Reported alongside so the effect of calibration is separable from the
     # effect of the representation when the strategies are compared.
     results["balanced_accuracy_at_half"] = score_at(
         test_label, test_score, 0.5)["balanced_accuracy"]
     results["threshold"] = threshold
+    results["temperature"] = temperature
     results["valid_balanced_accuracy"] = valid_results["balanced_accuracy"]
     results["valid_roc_auc"] = valid_results["roc_auc"]
     # Per-window scores with their timestamps, so temporal smoothing can be
