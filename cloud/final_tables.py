@@ -174,8 +174,8 @@ def main():
                   f"{p:.2g} | {ved(b, base)} |")
 
     print(f"\n## Tabela 6 -- resultados negativos\n")
-    print("| tecnica | BAC teste | vs controle | p | V/E/D | BAC validacao vs controle |")
-    print("|---|---|---|---|---|---|")
+    print("| tecnica | folds | BAC controle | BAC teste | vs controle | p | V/E/D | BAC validacao vs controle |")
+    print("|---|---|---|---|---|---|---|---|")
     ctl = D["Cabeca atencao, encoder congelado"]
     for nm, tag, maxf in (("Trials intermediarios (alvo suave)", "linear_attn-inter", 12),
                           ("Adaptacao em tempo de teste (featnorm)", "linear_attn-tta", None),
@@ -192,8 +192,13 @@ def main():
         _, p = wilcoxon(b2, b1)
         v2 = np.mean([d2[s][3]["valid_balanced_accuracy"] for s in common])
         v1 = np.mean([ctl[s][3]["valid_balanced_accuracy"] for s in common])
-        print(f"| {nm} | {b2.mean():.4f} | {(b2.mean() - b1.mean()) * 100:+.2f} pp | "
+        print(f"| {nm} | {len(common)} | {b1.mean():.4f} | {b2.mean():.4f} | "
+              f"{(b2.mean() - b1.mean()) * 100:+.2f} pp | "
               f"{p:.4f} | {ved(b2, b1)} | {(v2 - v1) * 100:+.2f} pp |")
+    print("\nO controle e a cabeca de atencao congelada restrita aos mesmos folds da "
+          "tecnica: 25 folds (0,8203) para TTA e temperatura, 12 folds para trials "
+          "intermediarios e adversarial. As diferencas so sao comparaveis dentro do "
+          "mesmo grupo de folds.")
     print("\nO adversarial degrada monotonicamente apenas na BAC de validacao (criterio "
           "de selecao). No teste suavizado as diferencas nao sao ordenadas em lambda.")
 
@@ -217,6 +222,18 @@ def main():
             print(f"| {nm} | {tag} | {b.mean():.4f} | {a.mean():.4f} | "
                   f"{(b.mean() - prev.mean()) * 100:+.2f} pp | {p:.2g} | {ved(b, prev)} |")
         prev = b
+    # same configuration as linear_c62-lr2e4, rerun in the final campaign with
+    # the attention head and the PEFT arms; it is the linear row of Tables 1-4
+    js = sorted((json.load(open(f)) for f in glob.glob(os.path.join(RESULTS, "linear_flat25_fold*.json"))),
+                key=lambda j: j["fold"])
+    b = np.array([j["balanced_accuracy_at_half"] for j in js])
+    a = np.array([j["roc_auc"] for j in js])
+    _, p = wilcoxon(b, prev)
+    print(f"| reexecucao, mesma config (campanha final) | linear_flat25 | {b.mean():.4f} | {a.mean():.4f} | "
+          f"{(b.mean() - prev.mean()) * 100:+.2f} pp | {p:.2g} | {ved(b, prev)} |")
+    print("\nA ultima linha nao muda fator algum: e variacao entre execucoes (piso de "
+          "ruido de BAC ~1,1 pp; AUROC quase identica). O ganho da cabeca de atencao "
+          "e medido contra ela, na mesma campanha: +5,90 pp.")
     print("\nO total de +6,14 pp e a soma dos dois passos; atribuir ao filtro sozinho "
           "e o erro que versoes anteriores deste texto cometeram.")
 
