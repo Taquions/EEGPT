@@ -27,6 +27,16 @@ from smooth_predictions import smooth, balanced_accuracy, roc_auc
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "downstream", "results_sadt")
 HALF_WIDTH = 60.0
 
+
+def ved(a, b):
+    """Wins/ties/losses of a over b per subject. Ties use isclose: two balanced
+    accuracies that differ only in float noise are the same result, and counting
+    them as wins for whichever side happens to be listed first inflated the
+    counts in earlier versions of this table."""
+    tie = np.isclose(a, b)
+    win = (a > b) & ~tie
+    return f"{int(win.sum())}/{int(tie.sum())}/{int((~win & ~tie).sum())}"
+
 ARMS = [
     ("Cabeca linear, encoder congelado", "linear_flat25"),
     ("Cabeca atencao, encoder congelado", "linear_attn25"),
@@ -113,7 +123,9 @@ def main():
               f"{r['peak_gb']:.2f} | {mins:.1f} |")
     print("\nOs tempos por fold NAO sao comparaveis entre linhas: os bracos congelados "
           "rodaram em L4 e os demais em A100. Medido na mesma A100, a cabeca de atencao "
-          "congelada leva 2,1 min/fold, o layer-wise 3,3 e o LoRA 6,1.")
+          "congelada leva 2,1 min/fold (execucao TTA, treino identico), o layer-wise 3,3 "
+          "e o LoRA 6,1: razoes de 1,6x e 2,9x. A cabeca linear congelada nao tem "
+          "medicao em A100.")
 
     print(f"\n## Tabela 4 -- Wilcoxon pareado com correcao de Holm (suavizado)\n")
     names = [n for n, _ in ARMS]
@@ -121,19 +133,19 @@ def main():
     rows = []
     for a, b in itertools.combinations(names, 2):
         _, p = wilcoxon(M[a], M[b])
-        rows.append([a, b, (M[a].mean() - M[b].mean()) * 100, p, int((M[a] > M[b]).sum())])
+        rows.append([a, b, (M[a].mean() - M[b].mean()) * 100, p, ved(M[a], M[b])])
     adj = holm([r[3] for r in rows])
-    print("| A | B | dif (pp) | p bruto | p Holm | vitorias |")
+    print("| A | B | dif (pp) | p bruto | p Holm | V/E/D de A |")
     print("|---|---|---|---|---|---|")
     for r, pa in sorted(zip(rows, adj), key=lambda x: x[1]):
         mark = " *" if pa < 0.05 else ""
-        print(f"| {r[0]} | {r[1]} | {r[2]:+.2f} | {r[3]:.4f} | {pa:.4f}{mark} | {r[4]}/{len(subs)} |")
+        print(f"| {r[0]} | {r[1]} | {r[2]:+.2f} | {r[3]:.4f} | {pa:.4f}{mark} | {r[4]} |")
     print("\n* significativo a 5 % apos correcao.")
 
     print(f"\n## Tabela 5 -- varredura da suavizacao (cabeca de atencao congelada)\n")
     d = D["Cabeca atencao, encoder congelado"]
     base = metrics(d, subs, 0.0)[0]
-    print("| meia-largura (s) | BAC | AUROC | vs 0 s | p | vitorias |")
+    print("| meia-largura (s) | BAC | AUROC | vs 0 s | p | V/E/D |")
     print("|---|---|---|---|---|---|")
     for hw in (0, 15, 30, 60, 120, 300):
         b, a = metrics(d, subs, float(hw))
@@ -142,15 +154,16 @@ def main():
         else:
             _, p = wilcoxon(b, base)
             print(f"| {hw} | {b.mean():.4f} | {a.mean():.4f} | {(b.mean() - base.mean()) * 100:+.2f} | "
-                  f"{p:.2g} | {int((b > base).sum())}/{len(subs)} |")
+                  f"{p:.2g} | {ved(b, base)} |")
 
     print(f"\n## Tabela 6 -- resultados negativos\n")
-    print("| tecnica | BAC | vs controle | p | vitorias |")
+    print("| tecnica | BAC teste | vs controle | p | V/E/D | BAC validacao vs controle |")
     print("|---|---|---|---|---|")
     ctl = D["Cabeca atencao, encoder congelado"]
     for nm, tag, maxf in (("Trials intermediarios (alvo suave)", "linear_attn-inter", 12),
                           ("Adaptacao em tempo de teste (featnorm)", "linear_attn-tta", None),
                           ("Temperature scaling", "linear_attn-temp", None),
+                          ("Adversarial de sujeito, lambda=0,03", "linear_adv003", 12),
                           ("Adversarial de sujeito, lambda=0,1", "linear_adv01", 12),
                           ("Adversarial de sujeito, lambda=0,3", "linear_adv03", 12)):
         d2 = load(tag, maxf)
@@ -160,8 +173,35 @@ def main():
         b2 = metrics(d2, common, HALF_WIDTH)[0]
         b1 = metrics(ctl, common, HALF_WIDTH)[0]
         _, p = wilcoxon(b2, b1)
+        v2 = np.mean([d2[s][3]["valid_balanced_accuracy"] for s in common])
+        v1 = np.mean([ctl[s][3]["valid_balanced_accuracy"] for s in common])
         print(f"| {nm} | {b2.mean():.4f} | {(b2.mean() - b1.mean()) * 100:+.2f} pp | "
-              f"{p:.4f} | {int((b2 > b1).sum())}/{len(common)} |")
+              f"{p:.4f} | {ved(b2, b1)} | {(v2 - v1) * 100:+.2f} pp |")
+    print("\nO adversarial degrada monotonicamente apenas na BAC de validacao (criterio "
+          "de selecao). No teste suavizado as diferencas nao sao ordenadas em lambda.")
+
+    print(f"\n## Tabela 7 -- substrato: filtro espacial e taxa de aprendizado (sem suavizacao)\n")
+    print("| passo | execucao | BAC@0,5 | AUROC | vs anterior | p | V/E/D |")
+    print("|---|---|---|---|---|---|---|")
+    prev = None
+    for nm, tag in (("30 canais, lr 5e-4", "linear"),
+                    ("+ filtro 62 canais (lr 5e-4)", "linear_c62-lr5e4"),
+                    ("+ lr 2e-4", "linear_c62-lr2e4")):
+        fs = sorted(glob.glob(os.path.join(RESULTS, f"{tag}_fold*.json")))
+        js = sorted((json.load(open(f)) for f in fs), key=lambda j: j["fold"])
+        # the 30-channel baseline predates threshold tuning, so its
+        # balanced_accuracy already is the one at 0.5
+        b = np.array([j.get("balanced_accuracy_at_half", j["balanced_accuracy"]) for j in js])
+        a = np.array([j["roc_auc"] for j in js])
+        if prev is None:
+            print(f"| {nm} | {tag} | {b.mean():.4f} | {a.mean():.4f} | -- | -- | -- |")
+        else:
+            _, p = wilcoxon(b, prev)
+            print(f"| {nm} | {tag} | {b.mean():.4f} | {a.mean():.4f} | "
+                  f"{(b.mean() - prev.mean()) * 100:+.2f} pp | {p:.2g} | {ved(b, prev)} |")
+        prev = b
+    print("\nO total de +6,14 pp e a soma dos dois passos; atribuir ao filtro sozinho "
+          "e o erro que versoes anteriores deste texto cometeram.")
 
     print(f"\n## Teto de calibracao (oraculo, inatingivel em operacao)\n")
     for nm in ("Cabeca atencao, encoder congelado",):
