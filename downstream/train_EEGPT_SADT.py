@@ -367,9 +367,15 @@ class LitEEGPTSADT(pl.LightningModule):
             raise ValueError(f"unknown strategy {self.args.strategy!r}")
 
     def head_parameters(self):
-        return (list(self.chan_conv.parameters())
-                + list(self.linear_probe1.parameters())
-                + list(self.linear_probe2.parameters()))
+        params = (list(self.chan_conv.parameters())
+                  + list(self.linear_probe1.parameters())
+                  + list(self.linear_probe2.parameters()))
+        if self.args.head == "attn":
+            # The aggregator is part of the head. Until this was added it was
+            # left out of the optimiser, so every attention-head run before it
+            # trained the projections around a randomly initialised decoder.
+            params += list(self.decoder.parameters()) + [self.cls_token]
+        return params
 
     def encoder_trainable(self):
         return [p for p in self.target_encoder.parameters() if p.requires_grad]
