@@ -79,6 +79,20 @@ def confusion(d, subs, hw):
     return tp, fn, fp, tn
 
 
+def sens_spec(d, subs, hw):
+    """Per-subject sensitivity and specificity, averaged across subjects -- the
+    same aggregation as the balanced accuracy beside them, so that
+    (sens + spec) / 2 equals the BAC column. Pooling the confusion matrix
+    instead would weight subject 44 about 38 times subject 4."""
+    se, sp = [], []
+    for s in subs:
+        p = smooth(d[s][0], d[s][2], hw) >= 0.5
+        l = d[s][1]
+        se.append((p & (l == 1)).sum() / (l == 1).sum())
+        sp.append((~p & (l == 0)).sum() / (l == 0).sum())
+    return float(np.mean(se)), float(np.mean(sp))
+
+
 def holm(pvals):
     order = sorted(range(len(pvals)), key=lambda i: pvals[i])
     adj = [0.0] * len(pvals)
@@ -104,14 +118,17 @@ def main():
     for hw, rot in ((0.0, "Tabela 1 -- pontuacoes cruas"),
                     (HALF_WIDTH, f"Tabela 2 -- suavizadas, meia-largura {HALF_WIDTH:.0f} s")):
         print(f"\n## {rot}\n")
-        print("| braco | BAC (media +- dp) | AUROC (media +- dp) | sens | espec | TP | FN | FP | TN |")
+        print("| braco | BAC (media +- dp) | AUROC (media +- dp) | sens (media) | espec (media) | TP | FN | FP | TN |")
         print("|---|---|---|---|---|---|---|---|---|")
         for n, _ in ARMS:
             b, a = metrics(D[n], subs, hw)
             tp, fn, fp, tn = confusion(D[n], subs, hw)
+            se, sp = sens_spec(D[n], subs, hw)
             print(f"| {n} | {b.mean():.4f} +- {b.std(ddof=1):.4f} | "
                   f"{a.mean():.4f} +- {a.std(ddof=1):.4f} | "
-                  f"{tp / (tp + fn):.3f} | {tn / (tn + fp):.3f} | {tp} | {fn} | {fp} | {tn} |")
+                  f"{se:.3f} | {sp:.3f} | {tp} | {fn} | {fp} | {tn} |")
+        print("\nBAC, AUROC, sens e espec sao medias por sujeito; (sens + espec) / 2 = BAC. "
+              "TP/FN/FP/TN sao contagens agregadas sobre todas as janelas, so para escala.")
 
     print(f"\n## Tabela 3 -- custo\n")
     print("| braco | params cabeca | params encoder | pico GB | min/fold |")
@@ -158,7 +175,7 @@ def main():
 
     print(f"\n## Tabela 6 -- resultados negativos\n")
     print("| tecnica | BAC teste | vs controle | p | V/E/D | BAC validacao vs controle |")
-    print("|---|---|---|---|---|")
+    print("|---|---|---|---|---|---|")
     ctl = D["Cabeca atencao, encoder congelado"]
     for nm, tag, maxf in (("Trials intermediarios (alvo suave)", "linear_attn-inter", 12),
                           ("Adaptacao em tempo de teste (featnorm)", "linear_attn-tta", None),
