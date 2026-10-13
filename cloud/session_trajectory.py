@@ -81,7 +81,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default=os.path.join(here, "..", "datasets", "downstream", "sadt_ts"))
     ap.add_argument("--results", default=os.path.join(here, "..", "downstream", "results_sadt"))
-    ap.add_argument("--tag", default="linear_attn25")
+    ap.add_argument("--tag", default="linear_attn25t")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)

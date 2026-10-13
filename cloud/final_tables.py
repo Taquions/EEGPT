@@ -39,11 +39,11 @@ def ved(a, b):
 
 ARMS = [
     ("Cabeca linear, encoder congelado", "linear_flat25"),
-    ("Cabeca atencao, encoder congelado", "linear_attn25"),
+    ("Cabeca atencao, encoder congelado", "linear_attn25t"),
     ("Cabeca linear + layer-wise", "layerwise_pw"),
     ("Cabeca linear + LoRA r=16", "lora_pw"),
-    ("Cabeca atencao + layer-wise", "layerwise_lw-attn"),
-    ("Cabeca atencao + LoRA r=16", "lora_lora-attn"),
+    ("Cabeca atencao + layer-wise", "layerwise_lw-attnt"),
+    ("Cabeca atencao + LoRA r=16", "lora_lora-attnt"),
 ]
 
 
@@ -138,11 +138,12 @@ def main():
         mins = np.mean([D[n][s][3]["train_seconds"] for s in subs]) / 60
         print(f"| {n} | {r['trainable_head']:,} | {r['trainable_encoder']:,} | "
               f"{r['peak_gb']:.2f} | {mins:.1f} |")
-    print("\nOs tempos por fold NAO sao comparaveis entre linhas: os bracos congelados "
-          "rodaram em L4 e os demais em A100. Medido na mesma A100, a cabeca de atencao "
-          "congelada leva 2,1 min/fold (execucao TTA, treino identico), o layer-wise 3,3 "
-          "e o LoRA 6,1: razoes de 1,6x e 2,9x. A cabeca linear congelada nao tem "
-          "medicao em A100.")
+    mins = {n: np.mean([D[n][s][3]["train_seconds"] for s in subs]) / 60 for n, _ in ARMS}
+    a, lw, lo = (mins[ARMS[i][0]] for i in (1, 4, 5))
+    print("\nA cabeca linear congelada rodou em L4; os demais bracos, em A100, e so "
+          f"entre eles os tempos sao comparaveis. Com a cabeca de atencao, o layer-wise "
+          f"custa {lw / a:.1f}x e o LoRA {lo / a:.1f}x o tempo do encoder congelado "
+          f"({a:.1f}, {lw:.1f} e {lo:.1f} min/fold).")
 
     print(f"\n## Tabela 4 -- Wilcoxon pareado com correcao de Holm (suavizado)\n")
     names = [n for n, _ in ARMS]
@@ -177,12 +178,12 @@ def main():
     print("| tecnica | folds | BAC controle | BAC teste | vs controle | p | V/E/D | BAC validacao vs controle |")
     print("|---|---|---|---|---|---|---|---|")
     ctl = D["Cabeca atencao, encoder congelado"]
-    for nm, tag, maxf in (("Trials intermediarios (alvo suave)", "linear_attn-inter", 12),
-                          ("Adaptacao em tempo de teste (featnorm)", "linear_attn-tta", None),
-                          ("Temperature scaling", "linear_attn-temp", None),
-                          ("Adversarial de sujeito, lambda=0,03", "linear_adv003", 12),
-                          ("Adversarial de sujeito, lambda=0,1", "linear_adv01", 12),
-                          ("Adversarial de sujeito, lambda=0,3", "linear_adv03", 12)):
+    for nm, tag, maxf in (("Trials intermediarios (alvo suave)", "linear_attn-intert", 12),
+                          ("Adaptacao em tempo de teste (featnorm)", "linear_attn-ttat", None),
+                          ("Temperature scaling", "linear_attn-tempt", None),
+                          ("Adversarial de sujeito, lambda=0,03", "linear_adv003t", 12),
+                          ("Adversarial de sujeito, lambda=0,1", "linear_adv01t", 12),
+                          ("Adversarial de sujeito, lambda=0,3", "linear_adv03t", 12)):
         d2 = load(tag, maxf)
         common = sorted(set(d2) & set(ctl))
         if not common:
@@ -196,7 +197,7 @@ def main():
               f"{(b2.mean() - b1.mean()) * 100:+.2f} pp | "
               f"{p:.4f} | {ved(b2, b1)} | {(v2 - v1) * 100:+.2f} pp |")
     print("\nO controle e a cabeca de atencao congelada restrita aos mesmos folds da "
-          "tecnica: 25 folds (0,8203) para TTA e temperatura, 12 folds para trials "
+          "tecnica: 25 folds para TTA e temperatura, 12 folds para trials "
           "intermediarios e adversarial. As diferencas so sao comparaveis dentro do "
           "mesmo grupo de folds.")
     print("\nO adversarial degrada monotonicamente apenas na BAC de validacao (criterio "
@@ -233,7 +234,7 @@ def main():
           f"{(b.mean() - prev.mean()) * 100:+.2f} pp | {p:.2g} | {ved(b, prev)} |")
     print("\nA ultima linha nao muda fator algum: e variacao entre execucoes (piso de "
           "ruido de BAC ~1,1 pp; AUROC quase identica). O ganho da cabeca de atencao "
-          "e medido contra ela, na mesma campanha: +5,90 pp.")
+          "e medido contra ela, na mesma campanha.")
     print("\nO total de +6,14 pp e a soma dos dois passos; atribuir ao filtro sozinho "
           "e o erro que versoes anteriores deste texto cometeram.")
 
