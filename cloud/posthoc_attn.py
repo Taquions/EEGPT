@@ -54,12 +54,13 @@ def wil(a, b):
     r is the thesis definition: Z from the statistic with the mean and variance
     of N = all subjects, although scipy drops zero differences from T. With ties
     that inflates |Z| (attn+LW vs attn+LoRA, 5 ties: r = 0.358 at p = 0.74).
-    r0 recomputes Z on the non-zero differences only, consistent with p."""
+    r0 recomputes Z on the non-zero differences only, consistent with p, and
+    divides by the same count of non-tied pairs."""
     w = wilcoxon(a, b)
     n = len(a)
     m = int((a != b).sum())
     z = lambda k: (w.statistic - k * (k + 1) / 4) / np.sqrt(k * (k + 1) * (2 * k + 1) / 24)
-    return w.pvalue, abs(z(n)) / np.sqrt(n), abs(z(m)) / np.sqrt(n)
+    return w.pvalue, abs(z(n)) / np.sqrt(n), abs(z(m)) / np.sqrt(m)
 
 
 def row(name, x, ref, p=True):
@@ -248,9 +249,9 @@ def arm_tables(tag):
     for r, pa in sorted(zip(rows, adj), key=lambda x: x[0][3]):
         mark = " *" if pa < 0.05 else ""
         print(f"| {r[0]} | {r[1]} | {r[2]:+.2f} | {r[3]:.4f} | {pa:.4f}{mark} | {r[4]} | {r[5]:.3f} | {r[6]:.3f} |")
-    print("\nr = |Z|/sqrt(N), N = sujeitos. A coluna r segue a tese: Z com media e variancia "
-          "de N, embora o T do Wilcoxon descarte as diferencas nulas; com empates isso infla r. "
-          "'r sem empates' usa o N efetivo no Z e e coerente com o p.")
+    print("\nr = |Z|/sqrt(N). Coluna r (versao antiga): Z com media e variancia de N = 25, embora "
+          "o T do Wilcoxon descarte as diferencas nulas; com empates isso infla |Z|. 'r sem empates': "
+          "N = pares nao empatados, o mesmo do teste, no Z e no denominador; coerente com o p.")
 
 
 def main():
