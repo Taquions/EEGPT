@@ -46,25 +46,28 @@ def load(results, tag):
 
 
 def fig_smoothing_sweep(D, subs, out):
-    """Why 60 s: the gain has an interior optimum, which pure noise reduction
-    would not produce. Both metrics are drawn because they peak at different
-    widths -- 60 s for the decision, 120 s for the ranking."""
-    d = D["Cabeça atenção, congelado"]
+    """Why 60 s, across all six arms: every curve has an interior optimum, which
+    pure noise reduction would not produce, and the decision metric flattens
+    between 60 and 90 s while the ranking metric keeps rising to 90 s."""
     hws = [0, 15, 30, 45, 60, 90, 120, 180, 240, 300]
-    bac = [np.mean([balanced_accuracy(d[s][1], smooth(d[s][0], d[s][2], h)) for s in subs]) for h in hws]
-    auc = [np.mean([roc_auc(d[s][1], smooth(d[s][0], d[s][2], h)) for s in subs]) for h in hws]
-
-    fig, ax = plt.subplots(figsize=(5.5, 3.4))
-    ax.plot(hws, bac, "o-", color="#1f77b4", label="Acurácia balanceada")
-    ax.plot(hws, auc, "s--", color="#d62728", label="AUROC")
-    ax.axvline(90, color="grey", ls=":", lw=1)
-    ax.text(93, min(bac) + 0.005, "janela de 90 s\nda regra de rotulagem",
-            fontsize=7, color="grey", va="bottom")
-    ax.set_xlabel("Meia-largura da suavização (s)")
-    ax.set_ylabel("Média sobre 25 sujeitos")
-    ax.legend(fontsize=8, frameon=False)
-    ax.grid(alpha=0.25)
-    fig.tight_layout()
+    fig, axes = plt.subplots(1, 2, figsize=(7.5, 3.4), sharex=True)
+    for name, _tag, colour in ARMS:
+        d = D[name]
+        bac = [np.mean([balanced_accuracy(d[s][1], smooth(d[s][0], d[s][2], h)) for s in subs]) for h in hws]
+        auc = [np.mean([roc_auc(d[s][1], smooth(d[s][0], d[s][2], h)) for s in subs]) for h in hws]
+        axes[0].plot(hws, bac, "o-", color=colour, ms=3, lw=1.2, label=name)
+        axes[1].plot(hws, auc, "o-", color=colour, ms=3, lw=1.2)
+    for ax, ylab in zip(axes, ["Acurácia balanceada", "AUROC"]):
+        ax.axvline(HALF_WIDTH, color="black", ls="--", lw=0.8)
+        ax.axvline(90, color="grey", ls=":", lw=1)
+        ax.set_xlabel("Meia-largura da suavização (s)")
+        ax.set_ylabel(ylab)
+        ax.grid(alpha=0.25)
+    axes[0].text(HALF_WIDTH + 4, 0.695, "60 s\n(adotada)", fontsize=7, ha="left", va="bottom")
+    axes[1].text(93, 0.765, "90 s\n(rotulagem)", fontsize=7, color="grey", va="bottom")
+    fig.legend(*axes[0].get_legend_handles_labels(), loc="lower center", ncol=3,
+               fontsize=7, frameon=False)
+    fig.tight_layout(rect=(0, 0.13, 1, 1))
     fig.savefig(os.path.join(out, "smoothing-sweep.pdf"))
     plt.close(fig)
 
