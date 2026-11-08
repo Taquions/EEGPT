@@ -219,8 +219,9 @@ def tta_gap(tta_tag, gap):
 
 
 def arm_tables(tag):
-    legacy = not tag.endswith("t")
-    arms = [(n, tag if t == "linear_attn25t" else t[:-1] if legacy and t.endswith("t") else t)
+    legacy = tag == "linear_attn25"
+    attn = dict(ARMS)["Cabeca atencao, encoder congelado"]
+    arms = [(n, tag if t == attn else t[:-1] if legacy and t.endswith("t") else t)
             for n, t in ARMS]
     D = {n: load(t) for n, t in arms}
     subs = sorted(set.intersection(*[set(subjects(d)) for d in D.values()]))

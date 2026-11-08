@@ -286,6 +286,16 @@ class LitEEGPTSADT(pl.LightningModule):
         self.chans_id = self.target_encoder.prepare_chan_ids(self.channel_names)
 
         self.chan_conv = Conv1dWithConstraint(N_INPUT_CHANNELS, self.chans_num, 1, max_norm=1)
+        if getattr(args, "chan_init", "random") == "identity":
+            # Start from the direct electrode mapping: each SADT channel feeds the
+            # encoder slot with its own name, so the channel embeddings learned in
+            # pretraining see the electrode they were trained on. Slots the montage
+            # lacks start at zero. The filter still trains from here.
+            with torch.no_grad():
+                self.chan_conv.weight.zero_()
+                self.chan_conv.bias.zero_()
+                for i, name in enumerate(SADT_CHANNELS):
+                    self.chan_conv.weight[self.channel_names.index(name), i, 0] = 1.0
         self.drop = nn.Dropout(p=0.5)
 
         if args.head == "flat":
@@ -330,6 +340,11 @@ class LitEEGPTSADT(pl.LightningModule):
         self.tta_stats = None
         self.valid_buffer = []
         self.is_sanity = True
+        # Weights at the best validation epoch, restored after fit when
+        # --restore-best is set; otherwise the last epoch is what gets scored.
+        self.best_valid = -1.0
+        self.best_epoch = -1
+        self.best_state = None
 
     def apply_strategy(self):
         """Decide which encoder parameters train, and record how many."""
@@ -491,8 +506,13 @@ class LitEEGPTSADT(pl.LightningModule):
         label = torch.cat([a for a, _ in self.valid_buffer]).numpy()
         score = torch.cat([b for _, b in self.valid_buffer]).numpy()
         metrics = ["accuracy", "balanced_accuracy", "roc_auc", "f1"]
-        for key, value in get_metrics(score, label, metrics, True).items():
+        values = get_metrics(score, label, metrics, True)
+        for key, value in values.items():
             self.log("valid_" + key, value, on_epoch=True, on_step=False)
+        bac = float(values["balanced_accuracy"])
+        if getattr(self.args, "restore_best", False) and bac > self.best_valid:
+            self.best_valid, self.best_epoch = bac, int(self.current_epoch)
+            self.best_state = {k: v.detach().cpu().clone() for k, v in self.state_dict().items()}
 
     def configure_optimizers(self):
         head = list(self.head_parameters())
@@ -666,6 +686,12 @@ def main():
                     help="train on the trials between the alert and drowsy thresholds "
                          "with a soft target from the reaction-time ratio; validation "
                          "and test always stay on the strict classes")
+    ap.add_argument("--restore-best", action="store_true",
+                    help="score the weights of the best validation-BAC epoch instead "
+                         "of the last one")
+    ap.add_argument("--chan-init", choices=["random", "identity"], default="random",
+                    help="spatial filter initialisation; identity maps each SADT "
+                         "electrode to the encoder slot of the same name")
     ap.add_argument("--spatial-grad", action="store_true",
                     help="linear: let the gradient pass through the frozen encoder "
                          "so the spatial filter trains (off reproduces the runs "
@@ -794,6 +820,9 @@ def main():
         torch.cuda.reset_peak_memory_stats()
     t0 = time.time()
     trainer.fit(model, train_loader, valid_loader)
+    if args.restore_best and model.best_state is not None:
+        model.load_state_dict(model.best_state)
+        print(f"restored epoch {model.best_epoch} (valid BAC {model.best_valid:.4f})")
     train_seconds = time.time() - t0
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -846,6 +875,8 @@ def main():
         "trainable_encoder": n_enc,
         "train_seconds": round(train_seconds, 1),
         "epochs_run": int(trainer.current_epoch),
+        "best_epoch": model.best_epoch if args.restore_best else None,
+        "best_valid_balanced_accuracy": model.best_valid if args.restore_best else None,
         "peak_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2)
                    if torch.cuda.is_available() else None,
         "window_s": n_times / 256.0,

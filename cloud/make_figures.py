@@ -22,8 +22,8 @@ from smooth_predictions import smooth, balanced_accuracy, roc_auc
 
 HALF_WIDTH = 60.0
 ARMS = [
-    ("Cabeça linear, congelado", "linear_flat25", "#9a9a9a"),
-    ("Cabeça atenção, congelado", "linear_attn25t", "#1f77b4"),
+    ("Cabeça linear, congelado", "linear_flat25s", "#9a9a9a"),
+    ("Cabeça atenção, congelado", "linear_attn25ts", "#1f77b4"),
     ("Cabeça linear + layer-wise", "layerwise_pw", "#ff7f0e"),
     ("Cabeça linear + LoRA", "lora_pw", "#2ca02c"),
     ("Cabeça atenção + layer-wise", "layerwise_lw-attnt", "#d62728"),

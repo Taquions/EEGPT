@@ -37,9 +37,18 @@ def ved(a, b):
     win = (a > b) & ~tie
     return f"{int(win.sum())}/{int(tie.sum())}/{int((~win & ~tie).sum())}"
 
+# The frozen arms first ran with the encoder under torch.no_grad(), which also
+# cut the gradient to the spatial filter below it: the filter stayed at its
+# random initialisation while the layer-wise and LoRA arms trained it. The 's'
+# runs (--spatial-grad) fix that and are the frozen arms of every table. The
+# old runs are kept for the like-for-like controls of Tables 6 and 7, whose
+# techniques were all run without --spatial-grad, and for Table 8.
+OLD_FROZEN = {"Cabeca linear, encoder congelado": "linear_flat25",
+              "Cabeca atencao, encoder congelado": "linear_attn25t"}
+
 ARMS = [
-    ("Cabeca linear, encoder congelado", "linear_flat25"),
-    ("Cabeca atencao, encoder congelado", "linear_attn25t"),
+    ("Cabeca linear, encoder congelado", "linear_flat25s"),
+    ("Cabeca atencao, encoder congelado", "linear_attn25ts"),
     ("Cabeca linear + layer-wise", "layerwise_pw"),
     ("Cabeca linear + LoRA r=16", "lora_pw"),
     ("Cabeca atencao + layer-wise", "layerwise_lw-attnt"),
@@ -140,8 +149,10 @@ def main():
               f"{r['peak_gb']:.2f} | {mins:.1f} |")
     mins = {n: np.mean([D[n][s][3]["train_seconds"] for s in subs]) / 60 for n, _ in ARMS}
     a, lw, lo = (mins[ARMS[i][0]] for i in (1, 4, 5))
-    print("\nA cabeca linear congelada rodou em L4; os demais bracos, em A100, e so "
-          f"entre eles os tempos sao comparaveis. Com a cabeca de atencao, o layer-wise "
+    print("\nTodos os bracos desta tabela rodaram em A100, exceto os folds 0-2 do "
+          "linear + LoRA (L4). Com --spatial-grad o gradiente atravessa o encoder "
+          "congelado, entao o braco congelado ja nao evita o backward pelo encoder. "
+          f"Com a cabeca de atencao, o layer-wise "
           f"custa {lw / a:.1f}x e o LoRA {lo / a:.1f}x o tempo do encoder congelado "
           f"({a:.1f}, {lw:.1f} e {lo:.1f} min/fold).")
 
@@ -177,7 +188,9 @@ def main():
     print(f"\n## Tabela 6 -- resultados negativos\n")
     print("| tecnica | folds | BAC controle | BAC teste | vs controle | p | V/E/D | BAC validacao vs controle |")
     print("|---|---|---|---|---|---|---|---|")
-    ctl = D["Cabeca atencao, encoder congelado"]
+    # the techniques below ran without --spatial-grad, so their control is the
+    # frozen attention run that shares that condition
+    ctl = load(OLD_FROZEN["Cabeca atencao, encoder congelado"])
     for nm, tag, maxf in (("Trials intermediarios (alvo suave)", "linear_attn-intert", 12),
                           ("Adaptacao em tempo de teste (featnorm)", "linear_attn-ttat", None),
                           ("Temperature scaling", "linear_attn-tempt", None),
@@ -237,6 +250,23 @@ def main():
           "e medido contra ela, na mesma campanha.")
     print("\nO total de +6,14 pp e a soma dos dois passos; atribuir ao filtro sozinho "
           "e o erro que versoes anteriores deste texto cometeram.")
+
+    print(f"\n## Tabela 8 -- correcao do filtro espacial nos bracos congelados\n")
+    print("| braco | escala | metrica | filtro aleatorio (antigo) | filtro treinado | dif (pp) | p | V/E/D |")
+    print("|---|---|---|---|---|---|---|---|")
+    for n, old in OLD_FROZEN.items():
+        Do = load(old)
+        common = sorted(set(Do) & set(subs))
+        for hw, esc in ((0.0, "crua"), (HALF_WIDTH, "60 s")):
+            bo, ao = metrics(Do, common, hw)
+            bn, an = metrics(D[n], common, hw)
+            for met, x, y in (("BAC", bn, bo), ("AUROC", an, ao)):
+                _, p = wilcoxon(x, y)
+                print(f"| {n} | {esc} | {met} | {y.mean():.4f} | {x.mean():.4f} | "
+                      f"{(x.mean() - y.mean()) * 100:+.2f} | {p:.4f} | {ved(x, y)} |")
+    print("\nAntigo: encoder sob torch.no_grad(), filtro espacial na inicializacao "
+          "aleatoria. Treinado: --spatial-grad, encoder ainda congelado. Os bracos "
+          "layer-wise e LoRA sempre treinaram o filtro e nao mudam.")
 
     print(f"\n## Teto de calibracao (oraculo, inatingivel em operacao)\n")
     for nm in ("Cabeca atencao, encoder congelado",):
