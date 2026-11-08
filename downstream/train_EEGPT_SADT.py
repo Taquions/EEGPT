@@ -389,7 +389,14 @@ class LitEEGPTSADT(pl.LightningModule):
 
     def forward(self, x):
         x = self.chan_conv(x)
-        if self.args.strategy == "linear":
+        if self.args.strategy == "linear" and getattr(self.args, "spatial_grad", False):
+            # The encoder's parameters stay frozen (requires_grad is False), but
+            # the graph is kept so the gradient reaches the spatial filter below
+            # it, as the upstream linear-probe scripts do. Under no_grad the
+            # filter never received a gradient and stayed at its random init.
+            self.target_encoder.eval()
+            z = self.target_encoder(x, self.chans_id.to(x))
+        elif self.args.strategy == "linear":
             self.target_encoder.eval()
             with torch.no_grad():
                 z = self.target_encoder(x, self.chans_id.to(x))
@@ -659,6 +666,10 @@ def main():
                     help="train on the trials between the alert and drowsy thresholds "
                          "with a soft target from the reaction-time ratio; validation "
                          "and test always stay on the strict classes")
+    ap.add_argument("--spatial-grad", action="store_true",
+                    help="linear: let the gradient pass through the frozen encoder "
+                         "so the spatial filter trains (off reproduces the runs "
+                         "in which it stayed at its random initialisation)")
     ap.add_argument("--head", default="flat", choices=["flat", "attn"],
                     help="how the patch sequence is aggregated before classification")
     ap.add_argument("--head-dim", type=int, default=64)
